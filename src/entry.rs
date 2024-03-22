@@ -562,7 +562,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 })?;
             } else {
                 if dst.exists() {
-                    let result = if dst.is_symlink() || dst.is_dir() {
+                    let result = if dst.is_symlink() || dst.is_file() {
                         remove_file(dst).await
                     } else {
                         remove_dir_all(dst).await
