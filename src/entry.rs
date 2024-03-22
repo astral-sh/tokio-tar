@@ -272,7 +272,7 @@ impl<R: Read + Unpin> Entry<R> {
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<bool> {
+    pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
         self.fields.unpack_in(dst.as_ref()).await
     }
 
@@ -414,7 +414,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         Ok(Some(pax_extensions(self.pax_extensions.as_ref().unwrap())))
     }
 
-    async fn unpack_in(&mut self, dst: &Path) -> io::Result<bool> {
+    async fn unpack_in(&mut self, dst: &Path) -> io::Result<Option<PathBuf>> {
         // Notes regarding bsdtar 2.8.3 / libarchive 2.8.3:
         // * Leading '/'s are trimmed. For example, `///test` is treated as
         //   `test`.
@@ -447,7 +447,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     // unpacking the file to prevent directory traversal
                     // security issues.  See, e.g.: CVE-2001-1267,
                     // CVE-2002-0399, CVE-2005-1918, CVE-2007-4131
-                    Component::ParentDir => return Ok(false),
+                    Component::ParentDir => return Ok(None),
 
                     Component::Normal(part) => file_dst.push(part),
                 }
@@ -457,13 +457,13 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Skip cases where only slashes or '.' parts were seen, because
         // this is effectively an empty filename.
         if *dst == *file_dst {
-            return Ok(true);
+            return Ok(None);
         }
 
         // Skip entries without a parent (i.e. outside of FS root)
         let parent = match file_dst.parent() {
             Some(p) => p,
-            None => return Ok(false),
+            None => return Ok(None),
         };
 
         if parent.symlink_metadata().is_err() {
@@ -478,7 +478,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             .await
             .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
 
-        Ok(true)
+        Ok(Some(file_dst))
     }
 
     /// Unpack as destination directory `dst`.
@@ -562,7 +562,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 })?;
             } else {
                 if dst.exists() {
-                    let result = if dst.is_symlink() || dst.is_file() {
+                    let result = if dst.is_symlink() || !dst.is_dir() {
                         remove_file(dst).await
                     } else {
                         remove_dir_all(dst).await
