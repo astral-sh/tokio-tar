@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::{
     fs,
-    fs::OpenOptions,
+    fs::{remove_dir_all, remove_file, OpenOptions},
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt},
 };
 
@@ -561,6 +561,25 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
+                if dst.exists() {
+                    let result = if dst.is_symlink() || dst.is_dir() {
+                        remove_file(dst).await
+                    } else {
+                        remove_dir_all(dst).await
+                    };
+
+                    result.map_err(|err| {
+                        Error::new(
+                            err.kind(),
+                            format!(
+                                "{} when removing existing file for symlinking {} to {}",
+                                err,
+                                src.display(),
+                                dst.display()
+                            ),
+                        )
+                    })?;
+                }
                 symlink(&src, dst).await.map_err(|err| {
                     Error::new(
                         err.kind(),
