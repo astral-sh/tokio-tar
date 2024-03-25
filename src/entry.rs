@@ -529,6 +529,41 @@ impl<R: Read + Unpin> EntryFields<R> {
                 )));
             }
 
+            if let Some(metadata) = fs::metadata(dst).await.ok() {
+                let result = if metadata.is_symlink() || !metadata.is_dir() {
+                    remove_file(dst).await
+                } else {
+                    remove_dir_all(dst).await
+                };
+
+                result.map_err(|err| {
+                    Error::new(
+                        err.kind(),
+                        format!(
+                            "{} when removing existing entity for linking {} to {}",
+                            err,
+                            src.display(),
+                            dst.display()
+                        ),
+                    )
+                })?;
+            }
+
+
+            if fs::symlink_metadata(dst).await.is_ok() {
+                remove_file(dst).await.map_err(|err| {
+                    Error::new(
+                        err.kind(),
+                        format!(
+                            "{} when removing existing symlink for linking {} to {}",
+                            err,
+                            src.display(),
+                            dst.display()
+                        ),
+                    )
+                })?;
+            }
+
             if kind.is_hard_link() {
                 let link_src = match target_base {
                     // If we're unpacking within a directory then ensure that
@@ -561,25 +596,6 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
-                if dst.exists() {
-                    let result = if dst.is_symlink() || !dst.is_dir() {
-                        remove_file(dst).await
-                    } else {
-                        remove_dir_all(dst).await
-                    };
-
-                    result.map_err(|err| {
-                        Error::new(
-                            err.kind(),
-                            format!(
-                                "{} when removing existing file for symlinking {} to {}",
-                                err,
-                                src.display(),
-                                dst.display()
-                            ),
-                        )
-                    })?;
-                }
                 symlink(&src, dst).await.map_err(|err| {
                     Error::new(
                         err.kind(),
