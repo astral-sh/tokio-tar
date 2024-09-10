@@ -3,11 +3,12 @@ use std::{
     collections::VecDeque,
     path::Path,
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
+};
+use portable_atomic::{
+    AtomicU64,
+    Ordering,
 };
 use tokio::{
     io::{self, AsyncRead as Read, AsyncReadExt},
