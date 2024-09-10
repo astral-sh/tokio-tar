@@ -398,7 +398,18 @@ impl<R: Read + Unpin> EntryFields<R> {
                     Some(Cow::Borrowed(bytes))
                 }
             }
-            None => self.header.link_name_bytes(),
+            None => {
+                if let Some(ref pax) = self.pax_extensions {
+                    let pax = pax_extensions(pax)
+                        .filter_map(|f| f.ok())
+                        .find(|f| f.key_bytes() == b"linkpath")
+                        .map(|f| f.value_bytes());
+                    if let Some(field) = pax {
+                        return Some(Cow::Borrowed(field));
+                    }
+                }
+                self.header.link_name_bytes()
+            }
         }
     }
 
@@ -548,7 +559,6 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             }
-
 
             if fs::symlink_metadata(dst).await.is_ok() {
                 remove_file(dst).await.map_err(|err| {
