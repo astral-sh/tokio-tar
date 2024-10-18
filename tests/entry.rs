@@ -348,3 +348,61 @@ async fn modify_symlink_just_created() {
     t!(t!(File::open(&test).await).read_to_end(&mut contents).await);
     assert_eq!(contents.len(), 0);
 }
+
+#[tokio::test]
+async fn overwrite_existing_symlink() {
+    let mut ar = async_tar::Builder::new(Vec::new());
+
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_path("foo"));
+    t!(header.set_link_name("test"));
+    header.set_cksum();
+    t!(ar.append(&header, &[][..]).await);
+
+    let bytes = t!(ar.into_inner().await);
+    let mut ar = async_tar::Archive::new(&bytes[..]);
+
+    let td = t!(Builder::new().prefix("tar").tempdir());
+
+    t!(tokio::fs::symlink("bar", td.path().join("foo")).await);
+
+    t!(ar.unpack(&td.path()).await);
+
+    assert_eq!(
+        t!(std::fs::read_link(td.path().join("foo"))),
+        std::path::PathBuf::from("test")
+    );
+}
+
+#[tokio::test]
+async fn overwrite_existing_hardlink() {
+    let mut ar = async_tar::Builder::new(Vec::new());
+
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(1);
+    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_path("foo"));
+    header.set_cksum();
+    t!(ar.append(&header, &b"x"[..]).await);
+
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(async_tar::EntryType::Link);
+    t!(header.set_path("test"));
+    t!(header.set_link_name("foo"));
+    header.set_cksum();
+    t!(ar.append(&header, &[][..]).await);
+
+    let bytes = t!(ar.into_inner().await);
+    let mut ar = async_tar::Archive::new(&bytes[..]);
+
+    let td = t!(Builder::new().prefix("tar").tempdir());
+
+    t!(tokio::fs::write(td.path().join("test"), b"y").await);
+
+    t!(ar.unpack(&td.path()).await);
+
+    assert_eq!(t!(std::fs::read_to_string(td.path().join("foo"))), "x");
+}

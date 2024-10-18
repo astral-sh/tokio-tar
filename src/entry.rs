@@ -549,8 +549,18 @@ impl<R: Read + Unpin> EntryFields<R> {
                     }
                     None => src.into_owned(),
                 };
-                fs::hard_link(&link_src, dst).await.map_err(|err| {
-                    Error::new(
+                match fs::hard_link(&link_src, dst).await {
+                    Ok(()) => Ok(()),
+                    Err(ref err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                        // If the destination already exists, we want to remove it
+                        // and try again. This is because the destination is
+                        // probably a symlink, and we want to overwrite the
+                        // symlink.
+                        fs::remove_file(dst).await?;
+                        fs::hard_link(&link_src, dst).await?;
+                        Ok(())
+                    }
+                    Err(err) => Err(Error::new(
                         err.kind(),
                         format!(
                             "{} when hard linking {} to {}",
@@ -558,11 +568,21 @@ impl<R: Read + Unpin> EntryFields<R> {
                             link_src.display(),
                             dst.display()
                         ),
-                    )
-                })?;
+                    )),
+                }?;
             } else {
-                symlink(&src, dst).await.map_err(|err| {
-                    Error::new(
+                match symlink(&src, dst).await {
+                    Ok(()) => Ok(()),
+                    Err(ref err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                        // If the destination already exists, we want to remove it
+                        // and try again. This is because the destination is
+                        // probably a symlink, and we want to overwrite the
+                        // symlink.
+                        fs::remove_file(dst).await?;
+                        symlink(&src, dst).await?;
+                        Ok(())
+                    }
+                    Err(err) => Err(Error::new(
                         err.kind(),
                         format!(
                             "{} when symlinking {} to {}",
@@ -570,8 +590,8 @@ impl<R: Read + Unpin> EntryFields<R> {
                             src.display(),
                             dst.display()
                         ),
-                    )
-                })?;
+                    )),
+                }?;
             };
             return Ok(Unpacked::Other);
 
