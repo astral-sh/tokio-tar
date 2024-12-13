@@ -763,6 +763,68 @@ async fn pax_simple() {
 }
 
 #[tokio::test]
+async fn pax_pending_interrupted() {
+    use std::pin::Pin;
+
+    struct SirPendalot<R> {
+        inner: R,
+        n: usize,
+    }
+
+    impl<R> SirPendalot<R>
+    where
+        R: AsyncRead + Unpin,
+    {
+        fn new(reader: R) -> Self {
+            Self {
+                inner: reader,
+                n: 0,
+            }
+        }
+
+        fn project(self: Pin<&mut Self>) -> (Pin<&mut R>, &mut usize) {
+            let Self { inner, n } = std::pin::Pin::into_inner(self);
+            (Pin::new(inner), n)
+        }
+    }
+    impl<R> AsyncRead for SirPendalot<R>
+    where
+        R: AsyncRead + Unpin,
+    {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            use std::task::Poll;
+
+            let (inner, n) = self.project();
+
+            let pend = *n % 2 == 0;
+            *n += 1;
+
+            if pend {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            inner.poll_read(cx, buf)
+        }
+    }
+
+    let ar = tar!("paxlongname.tar");
+    let ar = SirPendalot::new(ar);
+    let mut ar = Archive::new(ar);
+    let mut entries = t!(ar.entries());
+
+    let entry = t!(entries.next().await.unwrap());
+    let path = t!(entry.path());
+    let path = path.to_str().unwrap();
+
+    assert_eq!(path, "this_file_name_will_be_one_hundred_and_one_characters_long_once_i_add_some_more_characters_at_the_end");
+}
+
+#[tokio::test]
 async fn pax_path() {
     let mut ar = Archive::new(tar!("pax2.tar"));
     let mut entries = t!(ar.entries());
