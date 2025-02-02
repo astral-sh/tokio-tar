@@ -477,11 +477,9 @@ impl<R: Read + Unpin> EntryFields<R> {
             None => return Ok(None),
         };
 
-        if parent.symlink_metadata().is_err() {
-            fs::create_dir_all(&parent).await.map_err(|e| {
-                TarError::new(&format!("failed to create `{}`", parent.display()), e)
-            })?;
-        }
+        self.ensure_dir_created(dst, parent)
+            .await
+            .map_err(|e| TarError::new(&format!("failed to create `{}`", parent.display()), e))?;
 
         let canon_target = self.validate_inside_dst(dst, parent).await?;
 
@@ -862,6 +860,26 @@ impl<R: Read + Unpin> EntryFields<R> {
         async fn set_xattrs<R: Read + Unpin>(_: &mut EntryFields<R>, _: &Path) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    async fn ensure_dir_created(&self, dst: &Path, dir: &Path) -> io::Result<()> {
+        let mut ancestor = dir;
+        let mut dirs_to_create = Vec::new();
+        while tokio::fs::symlink_metadata(ancestor).await.is_err() {
+            dirs_to_create.push(ancestor);
+            if let Some(parent) = ancestor.parent() {
+                ancestor = parent;
+            } else {
+                break;
+            }
+        }
+        for ancestor in dirs_to_create.into_iter().rev() {
+            if let Some(parent) = ancestor.parent() {
+                self.validate_inside_dst(dst, parent).await?;
+            }
+            fs::create_dir(ancestor).await?;
+        }
+        Ok(())
     }
 
     async fn validate_inside_dst(&self, dst: &Path, file_dst: &Path) -> io::Result<PathBuf> {
