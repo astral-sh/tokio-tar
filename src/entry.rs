@@ -549,8 +549,10 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         if kind.is_dir() {
             self.unpack_dir(dst).await?;
-            if let Ok(mode) = self.header.mode() {
-                set_perms(dst, None, mode, self.preserve_permissions).await?;
+            if self.preserve_permissions {
+                if let Ok(mode) = self.header.mode() {
+                    set_perms(dst, None, mode).await?;
+                }
             }
             return Ok(Unpacked::Other);
         } else if kind.is_hard_link() || kind.is_symlink() {
@@ -682,8 +684,10 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Only applies to old headers.
         if self.header.as_ustar().is_none() && self.path_bytes().ends_with(b"/") {
             self.unpack_dir(dst).await?;
-            if let Ok(mode) = self.header.mode() {
-                set_perms(dst, None, mode, self.preserve_permissions).await?;
+            if self.preserve_permissions {
+                if let Ok(mode) = self.header.mode() {
+                    set_perms(dst, None, mode).await?;
+                }
             }
             return Ok(Unpacked::Other);
         }
@@ -768,8 +772,10 @@ impl<R: Read + Unpin> EntryFields<R> {
                 })?;
             }
         }
-        if let Ok(mode) = self.header.mode() {
-            set_perms(dst, Some(&mut f), mode, self.preserve_permissions).await?;
+        if self.preserve_permissions {
+            if let Ok(mode) = self.header.mode() {
+                set_perms(dst, Some(&mut f), mode).await?;
+            }
         }
         if self.unpack_xattrs {
             set_xattrs(self, dst).await?;
@@ -780,9 +786,8 @@ impl<R: Read + Unpin> EntryFields<R> {
             dst: &Path,
             f: Option<&mut fs::File>,
             mode: u32,
-            preserve: bool,
         ) -> Result<(), TarError> {
-            _set_perms(dst, f, mode, preserve).await.map_err(|e| {
+            _set_perms(dst, f, mode).await.map_err(|e| {
                 TarError::new(
                     &format!(
                         "failed to set permissions to {:o} \
@@ -796,15 +801,9 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
 
         #[cfg(any(unix, target_os = "redox"))]
-        async fn _set_perms(
-            dst: &Path,
-            f: Option<&mut fs::File>,
-            mode: u32,
-            preserve: bool,
-        ) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             use std::os::unix::prelude::*;
 
-            let mode = if preserve { mode } else { mode & 0o777 };
             let perm = std::fs::Permissions::from_mode(mode as _);
             match f {
                 Some(f) => f.set_permissions(perm).await,
@@ -813,12 +812,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
 
         #[cfg(windows)]
-        async fn _set_perms(
-            dst: &Path,
-            f: Option<&mut fs::File>,
-            mode: u32,
-            _preserve: bool,
-        ) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             if mode & 0o200 == 0o200 {
                 return Ok(());
             }
@@ -838,12 +832,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         #[cfg(target_arch = "wasm32")]
         #[allow(unused_variables)]
-        async fn _set_perms(
-            dst: &Path,
-            f: Option<&mut fs::File>,
-            mode: u32,
-            _preserve: bool,
-        ) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             Err(io::Error::new(io::ErrorKind::Other, "Not implemented"))
         }
 
