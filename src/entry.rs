@@ -2,6 +2,7 @@ use crate::{
     error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
 };
 use filetime::{self, FileTime};
+use rustc_hash::FxHashSet;
 use std::{
     borrow::Cow,
     cmp,
@@ -26,7 +27,7 @@ use tokio::{
 /// be inspected. It acts as a file handle by implementing the Reader trait. An
 /// entry cannot be rewritten once inserted into an archive.
 pub struct Entry<R: Read + Unpin> {
-    fields: EntryFields<R>,
+    pub(crate) fields: EntryFields<R>,
     _ignored: marker::PhantomData<Archive<R>>,
 }
 
@@ -274,7 +275,9 @@ impl<R: Read + Unpin> Entry<R> {
     /// # Ok(()) }) }
     /// ```
     pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
-        self.fields.unpack_in(dst.as_ref()).await
+        self.fields
+            .unpack_in(dst.as_ref(), &mut FxHashSet::default())
+            .await
     }
 
     /// Indicate whether extended file attributes (xattrs on Unix) are preserved
@@ -426,7 +429,20 @@ impl<R: Read + Unpin> EntryFields<R> {
         Ok(Some(pax_extensions(self.pax_extensions.as_ref().unwrap())))
     }
 
-    async fn unpack_in(&mut self, dst: &Path) -> io::Result<Option<PathBuf>> {
+    /// Unpack the [`Entry`] into the specified destination.
+    ///
+    /// It's assumed that `dst` is already canonicalized, and that the memoized set of validated
+    /// paths are tied to `dst`.
+    pub(crate) async fn unpack_in(
+        &mut self,
+        dst: &Path,
+        memo: &mut FxHashSet<PathBuf>,
+    ) -> io::Result<Option<PathBuf>> {
+        // It's assumed that `dst` is already canonicalized.
+        debug_assert!(dst
+            .canonicalize()
+            .is_ok_and(|canon_target| canon_target == dst));
+
         // Notes regarding bsdtar 2.8.3 / libarchive 2.8.3:
         // * Leading '/'s are trimmed. For example, `///test` is treated as
         //   `test`.
@@ -478,13 +494,16 @@ impl<R: Read + Unpin> EntryFields<R> {
             None => return Ok(None),
         };
 
-        self.ensure_dir_created(dst, parent)
-            .await
-            .map_err(|e| TarError::new(&format!("failed to create `{}`", parent.display()), e))?;
+        // Validate the parent, if we haven't seen it yet.
+        if !memo.contains(parent) {
+            self.ensure_dir_created(dst, parent).await.map_err(|e| {
+                TarError::new(&format!("failed to create `{}`", parent.display()), e)
+            })?;
+            self.validate_inside_dst(dst, parent).await?;
+            memo.insert(parent.to_path_buf());
+        }
 
-        let canon_target = self.validate_inside_dst(dst, parent).await?;
-
-        self.unpack(Some(&canon_target), &file_dst)
+        self.unpack(Some(&parent), &file_dst)
             .await
             .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
 
@@ -890,7 +909,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         Ok(())
     }
 
-    async fn validate_inside_dst(&self, dst: &Path, file_dst: &Path) -> io::Result<PathBuf> {
+    async fn validate_inside_dst(&self, dst: &Path, file_dst: &Path) -> io::Result<()> {
         // Abort if target (canonical) parent is outside of `dst`
         let canon_parent = file_dst.canonicalize().map_err(|err| {
             Error::new(
@@ -898,24 +917,18 @@ impl<R: Read + Unpin> EntryFields<R> {
                 format!("{} while canonicalizing {}", err, file_dst.display()),
             )
         })?;
-        let canon_target = dst.canonicalize().map_err(|err| {
-            Error::new(
-                err.kind(),
-                format!("{} while canonicalizing {}", err, dst.display()),
-            )
-        })?;
-        if !canon_parent.starts_with(&canon_target) {
+        if !canon_parent.starts_with(&dst) {
             let err = TarError::new(
                 &format!(
                     "trying to unpack outside of destination path: {}",
-                    canon_target.display()
+                    dst.display()
                 ),
                 // TODO: use ErrorKind::InvalidInput here? (minor breaking change)
                 Error::new(ErrorKind::Other, "Invalid argument"),
             );
             return Err(err.into());
         }
-        Ok(canon_target)
+        Ok(())
     }
 }
 

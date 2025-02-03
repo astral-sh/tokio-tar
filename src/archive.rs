@@ -1,3 +1,5 @@
+use portable_atomic::{AtomicU64, Ordering};
+use rustc_hash::FxHashSet;
 use std::{
     cmp,
     collections::VecDeque,
@@ -5,10 +7,6 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-};
-use portable_atomic::{
-    AtomicU64,
-    Ordering,
 };
 use tokio::{
     fs,
@@ -244,6 +242,9 @@ impl<R: Read + Unpin> Archive<R> {
             .await
             .unwrap_or_else(|_| dst.to_path_buf());
 
+        // Memoize filesystem calls to canonicalize paths.
+        let mut targets = FxHashSet::default();
+
         // Delay any directory entries until the end (they will be created if needed by
         // descendants), to ensure that directory permissions do not interfer with descendant
         // extraction.
@@ -253,12 +254,12 @@ impl<R: Read + Unpin> Archive<R> {
             if file.header().entry_type() == crate::EntryType::Directory {
                 directories.push(file);
             } else {
-                file.unpack_in(&dst).await?;
+                file.fields.unpack_in(&dst, &mut targets).await?;
             }
         }
 
         for mut dir in directories {
-            dir.unpack_in(&dst).await?;
+            dir.fields.unpack_in(&dst, &mut targets).await?;
         }
 
         Ok(())
