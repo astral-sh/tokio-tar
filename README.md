@@ -1,85 +1,26 @@
-<h1 align="center">tokio-tar</h1>
-<div align="center">
- <strong>
-   A tar archive reading/writing library for async Rust.
- </strong>
-</div>
+# `astral-tokio-tar`
 
-<br />
+A `tokio`-based tar archive reader and writer.
 
-<div align="center">
-  <!-- Crates version -->
-  <a href="https://crates.io/crates/tokio-tar">
-    <img src="https://img.shields.io/crates/v/tokio-tar.svg?style=flat-square"
-    alt="Crates.io version" />
-  </a>
-  <!-- Downloads -->
-  <a href="https://crates.io/crates/tokio-tar">
-    <img src="https://img.shields.io/crates/d/tokio-tar.svg?style=flat-square"
-      alt="Download" />
-  </a>
-  <!-- docs.rs docs -->
-  <a href="https://docs.rs/tokio-tar">
-    <img src="https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square"
-      alt="docs.rs docs" />
-  </a>
-</div>
+## Provenance
 
-<div align="center">
-  <h3>
-    <a href="https://docs.rs/tokio-tar">
-      API Docs
-    </a>
-    <span> | </span>
-    <a href="https://github.com/vorot93/tokio-tar/releases">
-      Releases
-    </a>
-  </h3>
-</div>
-<br/>
+This crate is a fork of [`edera-dev/tokio-tar`](https://github.com/edera-dev/tokio-tar),
+which was a fork of [`vorot93/tokio-tar`](https://github.com/vorot93/tokio-tar),
+which was a fork of [`dignifiedquire/async-tar`](https://github.com/dignifiedquire/async-tar),
+which is based on [`alexcrichton/tar-rs`](https://github.com/alexcrichton/tar-rs).
 
-> Based on the great [tar-rs](https://github.com/alexcrichton/tar-rs).
+As compared to the async tar crates, this crate includes a variety of performance improvements
+and missing patches from [`alexcrichton/tar-rs`](https://github.com/alexcrichton/tar-rs).
 
-## Reading an archive
+As compared to [`alexcrichton/tar-rs`](https://github.com/alexcrichton/tar-rs), this crate features
+the following modifications:
 
-```rust,no_run
-use tokio::io::stdin;
-use tokio::prelude::*;
+- Setting `preserve_permissions` to `false` will avoid setting _any_ permissions on extracted files.
+  In [`alexcrichton/tar-rs`](https://github.com/alexcrichton/tar-rs), setting `preserve_permissions`
+  to `false` will still set read, write, and execute permissions on extracted files, but will avoid
+  setting extended permissions (e.g., `setuid`, `setgid`, and `sticky` bits).
 
-use tokio_tar::Archive;
-
-fn main() {
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let mut ar = Archive::new(stdin());
-        let mut entries = ar.entries().unwrap();
-        while let Some(file) = entries.next().await {
-            let f = file.unwrap();
-            println!("{}", f.path().unwrap().display());
-        }
-    });
-}
-```
-
-## Writing an archive
-
-```rust,no_run
-use tokio::fs::File;
-use tokio_tar::Builder;
-
-fn main() {
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let file = File::create("foo.tar").await.unwrap();
-        let mut a = Builder::new(file);
-
-        a.append_path("README.md").await.unwrap();
-        a.append_file("lib.rs", &mut File::open("src/lib.rs").await.unwrap())
-            .await
-            .unwrap();
-    });
-}
-```
-
-# License
+## License
 
 This project is licensed under either of
 
@@ -90,7 +31,7 @@ This project is licensed under either of
 
 at your option.
 
-### Contribution
+## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
