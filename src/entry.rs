@@ -6,6 +6,7 @@ use std::{
     borrow::Cow,
     cmp,
     collections::VecDeque,
+    convert::TryFrom,
     fmt,
     io::{Error, ErrorKind, SeekFrom},
     marker,
@@ -16,7 +17,7 @@ use std::{
 use tokio::{
     fs,
     fs::{remove_dir_all, remove_file, OpenOptions},
-    io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt},
+    io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
 /// A read-only view into an entry of an archive.
@@ -689,22 +690,29 @@ impl<R: Read + Unpin> EntryFields<R> {
                     }
                 }
             }?;
+
+            let size = usize::try_from(self.size).unwrap_or(usize::MAX);
+            let capacity = cmp::min(size, 128 * 1024);
+            let mut writer = io::BufWriter::with_capacity(capacity, &mut f);
             for io in self.data.drain(..) {
                 match io {
                     EntryIo::Data(mut d) => {
                         let expected = d.limit();
-                        if io::copy(&mut d, &mut f).await? != expected {
+                        if io::copy(&mut d, &mut writer).await? != expected {
                             return Err(other("failed to write entire file"));
                         }
                     }
                     EntryIo::Pad(d) => {
                         // TODO: checked cast to i64
-                        let to = SeekFrom::Current(d.limit() as i64);
-                        let size = f.seek(to).await?;
-                        f.set_len(size).await?;
+                        let pad_len = d.limit() as i64;
+                        writer.flush().await?;
+                        let f = writer.get_mut();
+                        let new_size = f.seek(SeekFrom::Current(pad_len)).await?;
+                        f.set_len(new_size).await?;
                     }
                 }
             }
+            writer.flush().await?;
             Ok::<fs::File, io::Error>(f)
         }
         .await
