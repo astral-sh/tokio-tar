@@ -238,15 +238,13 @@ impl<R: Read + Unpin> Archive<R> {
         // extended-length path with a 32,767 character limit. Otherwise all
         // unpacked paths over 260 characters will fail on creation with a
         // NotFound exception.
-        let dst = fs::canonicalize(dst)
-            .await
-            .unwrap_or_else(|_| dst.to_path_buf());
+        let dst = fs::canonicalize(dst).await?;
 
         // Memoize filesystem calls to canonicalize paths.
         let mut targets = FxHashSet::default();
 
         // Delay any directory entries until the end (they will be created if needed by
-        // descendants), to ensure that directory permissions do not interfer with descendant
+        // descendants), to ensure that directory permissions do not interfere with descendant
         // extraction.
         let mut directories = Vec::new();
         while let Some(entry) = pinned.next().await {
@@ -254,12 +252,12 @@ impl<R: Read + Unpin> Archive<R> {
             if file.header().entry_type() == crate::EntryType::Directory {
                 directories.push(file);
             } else {
-                file.fields.unpack_in(&dst, &mut targets).await?;
+                file.unpack_in_memo(&dst, &mut targets).await?;
             }
         }
 
         for mut dir in directories {
-            dir.fields.unpack_in(&dst, &mut targets).await?;
+            dir.unpack_in_memo(&dst, &mut targets).await?;
         }
 
         Ok(())
