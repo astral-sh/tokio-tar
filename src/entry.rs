@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     convert::TryFrom,
     fmt,
-    io::{Error, ErrorKind, SeekFrom},
+    io::{Cursor, Error, ErrorKind, SeekFrom},
     marker,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -348,15 +348,22 @@ impl<R: Read + Unpin> EntryFields<R> {
     pub(crate) fn poll_read_all(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<io::Result<Vec<u8>>> {
+        out: &mut Cursor<Vec<u8>>,
+    ) -> Poll<io::Result<()>> {
         // Preallocate some data but don't let ourselves get too crazy now.
         let cap = cmp::min(self.size, 128 * 1024);
         let mut buf = Vec::with_capacity(cap as usize);
 
         // Copied from futures::ReadToEnd
-        match futures_core::ready!(poll_read_all_internal(self, cx, &mut buf)) {
-            Ok(_) => Poll::Ready(Ok(buf)),
-            Err(err) => Poll::Ready(Err(err)),
+        match poll_read_all_internal(self, cx, &mut buf) {
+            Poll::Ready(t) => {
+                std::io::Write::write_all(out, &buf)?;
+                Poll::Ready(t.map(|_| ()))
+            }
+            Poll::Pending => {
+                std::io::Write::write_all(out, &buf)?;
+                Poll::Pending
+            }
         }
     }
 

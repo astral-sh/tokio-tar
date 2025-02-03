@@ -3,6 +3,7 @@ use rustc_hash::FxHashSet;
 use std::{
     cmp,
     collections::VecDeque,
+    io::Cursor,
     path::Path,
     pin::Pin,
     sync::Arc,
@@ -185,10 +186,11 @@ impl<R: Read + Unpin> Archive<R> {
 
         Ok(Entries {
             archive: self.clone(),
+            pending: None,
             current: (0, None, 0, None),
-            gnu_longlink: None,
-            gnu_longname: None,
-            pax_extensions: None,
+            gnu_longlink: (false, None),
+            gnu_longname: (false, None),
+            pax_extensions: (false, None),
         })
     }
 
@@ -289,9 +291,10 @@ impl<R: Read + Unpin> Archive<R> {
 pub struct Entries<R: Read + Unpin> {
     archive: Archive<R>,
     current: (u64, Option<Header>, usize, Option<GnuExtSparseHeader>),
-    gnu_longname: Option<Vec<u8>>,
-    gnu_longlink: Option<Vec<u8>>,
-    pax_extensions: Option<Vec<u8>>,
+    pending: Option<Entry<Archive<R>>>,
+    gnu_longname: (bool, Option<Cursor<Vec<u8>>>),
+    gnu_longlink: (bool, Option<Cursor<Vec<u8>>>),
+    pax_extensions: (bool, Option<Cursor<Vec<u8>>>),
 }
 
 macro_rules! ready_opt_err {
@@ -319,61 +322,123 @@ impl<R: Read + Unpin> Stream for Entries<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let archive = self.archive.clone();
-            let (next, current_header, current_header_pos, _) = &mut self.current;
-            let entry = ready_opt_err!(poll_next_raw(
-                archive,
-                next,
-                current_header,
-                current_header_pos,
-                cx
-            ));
+
+            let entry = if let Some(entry) = self.pending.take() {
+                entry
+            } else {
+                let (next, current_header, current_header_pos, _) = &mut self.current;
+                ready_opt_err!(poll_next_raw(
+                    archive,
+                    next,
+                    current_header,
+                    current_header_pos,
+                    cx
+                ))
+            };
 
             let is_recognized_header =
                 entry.header().as_gnu().is_some() || entry.header().as_ustar().is_some();
+
             if is_recognized_header && entry.header().entry_type().is_gnu_longname() {
-                if self.gnu_longname.is_some() {
+                if self.gnu_longname.0 {
                     return Poll::Ready(Some(Err(other(
                         "two long name entries describing \
                          the same member",
                     ))));
                 }
+                let cursor = self
+                    .gnu_longname
+                    .1
+                    .get_or_insert_with(|| Cursor::new(Vec::new()));
 
                 let mut ef = EntryFields::from(entry);
-                let val = ready_err!(Pin::new(&mut ef).poll_read_all(cx));
-                self.gnu_longname = Some(val);
+                if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
+                    if let Err(err) = result {
+                        self.pending = None;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                } else {
+                    self.pending = Some(ef.into_entry());
+                    return Poll::Pending;
+                }
+
+                self.gnu_longname.0 = true;
                 continue;
             }
 
             if is_recognized_header && entry.header().entry_type().is_gnu_longlink() {
-                if self.gnu_longlink.is_some() {
+                if self.gnu_longlink.0 {
                     return Poll::Ready(Some(Err(other(
                         "two long name entries describing \
                          the same member",
                     ))));
                 }
+                let cursor = self
+                    .gnu_longlink
+                    .1
+                    .get_or_insert_with(|| Cursor::new(Vec::new()));
+
                 let mut ef = EntryFields::from(entry);
-                let val = ready_err!(Pin::new(&mut ef).poll_read_all(cx));
-                self.gnu_longlink = Some(val);
+                if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
+                    if let Err(err) = result {
+                        self.pending = None;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                } else {
+                    self.pending = Some(ef.into_entry());
+                    return Poll::Pending;
+                }
+
+                self.gnu_longlink.0 = true;
                 continue;
             }
 
             if is_recognized_header && entry.header().entry_type().is_pax_local_extensions() {
-                if self.pax_extensions.is_some() {
+                if self.pax_extensions.0 {
                     return Poll::Ready(Some(Err(other(
                         "two pax extensions entries describing \
                          the same member",
                     ))));
                 }
+                let cursor = self
+                    .pax_extensions
+                    .1
+                    .get_or_insert_with(|| Cursor::new(Vec::new()));
+
                 let mut ef = EntryFields::from(entry);
-                let val = ready_err!(Pin::new(&mut ef).poll_read_all(cx));
-                self.pax_extensions = Some(val);
+                if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
+                    if let Err(err) = result {
+                        self.pending = None;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                } else {
+                    self.pending = Some(ef.into_entry());
+                    return Poll::Pending;
+                }
+
+                self.pax_extensions.0 = true;
                 continue;
             }
 
+            self.pending = None;
+
             let mut fields = EntryFields::from(entry);
-            fields.long_pathname = self.gnu_longname.take();
-            fields.long_linkname = self.gnu_longlink.take();
-            fields.pax_extensions = self.pax_extensions.take();
+            if self.gnu_longname.0 {
+                fields.long_pathname = self.gnu_longname.1.take().map(|cursor| cursor.into_inner());
+                self.gnu_longname.0 = false;
+            }
+            if self.gnu_longlink.0 {
+                fields.long_linkname = self.gnu_longlink.1.take().map(|cursor| cursor.into_inner());
+                self.gnu_longlink.0 = false;
+            }
+            if self.pax_extensions.0 {
+                fields.pax_extensions = self
+                    .pax_extensions
+                    .1
+                    .take()
+                    .map(|cursor| cursor.into_inner());
+                self.pax_extensions.0 = false;
+            }
 
             let archive = self.archive.clone();
             let (next, _, current_pos, current_ext) = &mut self.current;
