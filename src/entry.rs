@@ -27,7 +27,7 @@ use tokio::{
 /// be inspected. It acts as a file handle by implementing the Reader trait. An
 /// entry cannot be rewritten once inserted into an archive.
 pub struct Entry<R: Read + Unpin> {
-    pub(crate) fields: EntryFields<R>,
+    fields: EntryFields<R>,
     _ignored: marker::PhantomData<Archive<R>>,
 }
 
@@ -280,6 +280,18 @@ impl<R: Read + Unpin> Entry<R> {
             .await
     }
 
+    /// Extracts this file under the specified path, avoiding security issues.
+    ///
+    /// Like [`unpack_in`], but memoizes the set of validated paths to avoid
+    /// redundant filesystem operations.
+    pub async fn unpack_in_memo<P: AsRef<Path>>(
+        &mut self,
+        dst: P,
+        memo: &mut FxHashSet<PathBuf>,
+    ) -> io::Result<Option<PathBuf>> {
+        self.fields.unpack_in(dst.as_ref(), memo).await
+    }
+
     /// Indicate whether extended file attributes (xattrs on Unix) are preserved
     /// when unpacking this entry.
     ///
@@ -433,15 +445,16 @@ impl<R: Read + Unpin> EntryFields<R> {
     ///
     /// It's assumed that `dst` is already canonicalized, and that the memoized set of validated
     /// paths are tied to `dst`.
-    pub(crate) async fn unpack_in(
+    async fn unpack_in(
         &mut self,
         dst: &Path,
         memo: &mut FxHashSet<PathBuf>,
     ) -> io::Result<Option<PathBuf>> {
         // It's assumed that `dst` is already canonicalized.
-        debug_assert!(dst
-            .canonicalize()
-            .is_ok_and(|canon_target| canon_target == dst));
+        if cfg!(debug_assertions) {
+            let canon_target = dst.canonicalize()?;
+            assert_eq!(canon_target, dst, "Destination path must be canonicalized");
+        }
 
         // Notes regarding bsdtar 2.8.3 / libarchive 2.8.3:
         // * Leading '/'s are trimmed. For example, `///test` is treated as
