@@ -275,16 +275,17 @@ impl<R: Read + Unpin> Entry<R> {
     /// # Ok(()) }) }
     /// ```
     pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
-        self.fields
-            .unpack_in(dst.as_ref(), &mut FxHashSet::default())
-            .await
+        let dst = dst.as_ref().canonicalize()?;
+        let mut memo = FxHashSet::default();
+        self.fields.unpack_in(&dst, &mut memo).await
     }
 
     /// Extracts this file under the specified path, avoiding security issues.
     ///
     /// Like [`unpack_in`], but memoizes the set of validated paths to avoid
-    /// redundant filesystem operations.
-    pub async fn unpack_in_memo<P: AsRef<Path>>(
+    /// redundant filesystem operations and assumes that the destination path
+    /// is already canonicalized.
+    pub async fn unpack_in_raw<P: AsRef<Path>>(
         &mut self,
         dst: P,
         memo: &mut FxHashSet<PathBuf>,
