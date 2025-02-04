@@ -2,6 +2,7 @@ extern crate tokio_tar as async_tar;
 
 extern crate tempfile;
 
+#[cfg_attr(windows, allow(unused_imports))]
 use tokio::{fs, fs::File, io::AsyncReadExt};
 use tokio_stream::*;
 
