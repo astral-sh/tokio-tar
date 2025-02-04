@@ -80,7 +80,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
-    /// Indicate whether extended permissions (like suid on Unix) are preserved
+    /// Indicate whether the permissions on files and directories are preserved
     /// when unpacking this entry.
     ///
     /// This flag is disabled by default and is currently only implemented on

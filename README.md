@@ -20,6 +20,8 @@ the following modifications:
   to `false` will still set read, write, and execute permissions on extracted files, but will avoid
   setting extended permissions (e.g., `setuid`, `setgid`, and `sticky` bits).
 
+See the [changelog](CHANGELOG.md) for a more detailed list of changes.
+
 ## License
 
 This project is licensed under either of
