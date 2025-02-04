@@ -3,7 +3,7 @@
 ///
 /// Each `Header` has an `entry_type` method returning an instance of this type
 /// which can be used to inspect what the header is describing.
-
+///
 /// A non-exhaustive enum representing the possible entry types
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]

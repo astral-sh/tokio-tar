@@ -1273,7 +1273,7 @@ impl fmt::Debug for GnuHeader {
 
 struct DebugSparseHeaders<'a>(&'a [GnuSparseHeader]);
 
-impl<'a> fmt::Debug for DebugSparseHeaders<'a> {
+impl fmt::Debug for DebugSparseHeaders<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut f = f.debug_list();
         for header in self.0 {
@@ -1510,7 +1510,7 @@ fn copy_path_into(mut slot: &mut [u8], path: &Path, is_link_name: bool) -> io::R
         return Err(other("paths in archives must have at least one component"));
     }
     if ends_with_slash(path) {
-        copy(&mut slot, &[b'/'])?;
+        copy(&mut slot, b"/")?;
     }
     return Ok(());
 
@@ -1535,7 +1535,7 @@ fn ends_with_slash(p: &Path) -> bool {
 
 #[cfg(any(unix, target_os = "redox"))]
 fn ends_with_slash(p: &Path) -> bool {
-    p.as_os_str().as_bytes().ends_with(&[b'/'])
+    p.as_os_str().as_bytes().ends_with(b"/")
 }
 
 #[cfg(any(windows, target_arch = "wasm32"))]
@@ -1563,7 +1563,7 @@ pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
 #[cfg(any(unix, target_os = "redox"))]
 /// On unix this will never fail
 pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
-    Ok(p.as_os_str().as_bytes()).map(Cow::Borrowed)
+    Ok(Cow::Borrowed(p.as_os_str().as_bytes()))
 }
 
 #[cfg(windows)]

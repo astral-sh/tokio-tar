@@ -516,7 +516,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             memo.insert(parent.to_path_buf());
         }
 
-        self.unpack(Some(&dst), &file_dst)
+        self.unpack(Some(dst), &file_dst)
             .await
             .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
 
@@ -573,7 +573,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 )));
             }
 
-            if let Some(metadata) = fs::metadata(dst).await.ok() {
+            if let Ok(metadata) = fs::metadata(dst).await {
                 let result = if metadata.is_symlink() || !metadata.is_dir() {
                     remove_file(dst).await
                 } else {
@@ -919,7 +919,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 format!("{} while canonicalizing {}", err, file_dst.display()),
             )
         })?;
-        if !canon_parent.starts_with(&dst) {
+        if !canon_parent.starts_with(dst) {
             let err = TarError::new(
                 &format!(
                     "trying to unpack outside of destination path: {}",
