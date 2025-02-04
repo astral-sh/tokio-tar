@@ -516,7 +516,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             memo.insert(parent.to_path_buf());
         }
 
-        self.unpack(Some(&parent), &file_dst)
+        self.unpack(Some(&dst), &file_dst)
             .await
             .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
 
