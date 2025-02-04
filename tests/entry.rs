@@ -2,7 +2,7 @@ extern crate tokio_tar as async_tar;
 
 extern crate tempfile;
 
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{fs, fs::File, io::AsyncReadExt};
 use tokio_stream::*;
 
 use tempfile::Builder;
@@ -157,7 +157,7 @@ async fn relative_link_deref_error() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn directory_maintains_permissions() {
+async fn directory_permissions_are_cleared() {
     use ::std::os::unix::fs::PermissionsExt;
 
     let mut ar = async_tar::Builder::new(Vec::new());
@@ -176,9 +176,19 @@ async fn directory_maintains_permissions() {
     let td = t!(Builder::new().prefix("tar").tempdir());
     t!(ar.unpack(td.path()).await);
     let f = t!(File::open(td.path().join("foo")).await);
-    let md = t!(f.metadata().await);
-    assert!(md.is_dir());
-    assert_eq!(md.permissions().mode(), 0o40777);
+    let from_archive_md = t!(f.metadata().await);
+    assert!(from_archive_md.is_dir());
+
+    // To determine the default umask, create a fresh directory that gets it assigned by the OS.
+    let manually_created = td.path().join("bar");
+    t!(fs::create_dir(&manually_created).await);
+    let f = t!(File::open(&manually_created).await);
+    let loca_md = t!(f.metadata().await);
+
+    assert_eq!(
+        from_archive_md.permissions().mode(),
+        loca_md.permissions().mode()
+    );
 }
 
 #[tokio::test]
