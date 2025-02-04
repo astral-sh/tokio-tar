@@ -252,7 +252,7 @@ impl<R: Read + Unpin> Archive<R> {
             if file.header().entry_type() == crate::EntryType::Directory {
                 directories.push(file);
             } else {
-                file.unpack_in_memo(&dst, &mut targets).await?;
+                file.unpack_in_raw(&dst, &mut targets).await?;
             }
         }
 
@@ -265,7 +265,7 @@ impl<R: Read + Unpin> Archive<R> {
         // [0]: <https://github.com/alexcrichton/tar-rs/issues/242>
         directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
         for mut dir in directories {
-            dir.unpack_in_memo(&dst, &mut targets).await?;
+            dir.unpack_in_raw(&dst, &mut targets).await?;
         }
 
         Ok(())
