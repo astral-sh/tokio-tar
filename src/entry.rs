@@ -474,7 +474,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         {
             let path = self.path().map_err(|e| {
                 TarError::new(
-                    &format!("invalid path in entry header: {}", self.path_lossy()),
+                    format!("invalid path in entry header: {}", self.path_lossy()),
                     e,
                 )
             })?;
@@ -511,7 +511,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Validate the parent, if we haven't seen it yet.
         if !memo.contains(parent) {
             self.ensure_dir_created(dst, parent).await.map_err(|e| {
-                TarError::new(&format!("failed to create `{}`", parent.display()), e)
+                TarError::new(format!("failed to create `{}`", parent.display()), e)
             })?;
             self.validate_inside_dst(dst, parent).await?;
             memo.insert(parent.to_path_buf());
@@ -519,7 +519,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         self.unpack(Some(dst), &file_dst)
             .await
-            .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
+            .map_err(|e| TarError::new(format!("failed to unpack `{}`", file_dst.display()), e))?;
 
         Ok(Some(file_dst))
     }
@@ -756,7 +756,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         .map_err(|e| {
             let header = self.header.path_bytes();
             TarError::new(
-                &format!(
+                format!(
                     "failed to unpack `{}` into `{}`",
                     String::from_utf8_lossy(&header),
                     dst.display()
@@ -769,7 +769,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             if let Ok(mtime) = self.header.mtime() {
                 let mtime = FileTime::from_unix_time(mtime as i64, 0);
                 filetime::set_file_times(dst, mtime, mtime).map_err(|e| {
-                    TarError::new(&format!("failed to set mtime for `{}`", dst.display()), e)
+                    TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
                 })?;
             }
         }
@@ -790,7 +790,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         ) -> Result<(), TarError> {
             _set_perms(dst, f, mode).await.map_err(|e| {
                 TarError::new(
-                    &format!(
+                    format!(
                         "failed to set permissions to {:o} \
                          for `{}`",
                         mode,
@@ -864,7 +864,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             for (key, value) in exts {
                 xattr::set(dst, key, value).map_err(|e| {
                     TarError::new(
-                        &format!(
+                        format!(
                             "failed to set extended \
                              attributes to {}. \
                              Xattrs: key={:?}, value={:?}.",
@@ -922,7 +922,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         })?;
         if !canon_parent.starts_with(dst) {
             let err = TarError::new(
-                &format!(
+                format!(
                     "trying to unpack outside of destination path: {}",
                     dst.display()
                 ),
