@@ -15,6 +15,7 @@ use tokio::{
 };
 use tokio_stream::*;
 
+use crate::header::BLOCK_SIZE;
 use crate::{
     entry::{EntryFields, EntryIo},
     error::TarError,
@@ -435,7 +436,7 @@ fn poll_next_raw<R: Read + Unpin>(
         // Otherwise, check if we are ignoring zeros and continue, or break as if this is the
         // end of the archive.
         if !header.as_bytes().iter().all(|i| *i == 0) {
-            *next += 512;
+            *next += BLOCK_SIZE;
             break;
         }
 
@@ -443,7 +444,7 @@ fn poll_next_raw<R: Read + Unpin>(
             return Poll::Ready(None);
         }
 
-        *next += 512;
+        *next += BLOCK_SIZE;
         header_pos = *next;
     }
 
@@ -486,10 +487,10 @@ fn poll_next_raw<R: Read + Unpin>(
     // Store where the next entry is, rounding up by 512 bytes (the size of
     // a header);
     let size = size
-        .checked_add(511)
+        .checked_add(BLOCK_SIZE - 1)
         .ok_or_else(|| other("size overflow"))?;
     *next = next
-        .checked_add(size & !511)
+        .checked_add(size & !(BLOCK_SIZE - 1))
         .ok_or_else(|| other("size overflow"))?;
 
     Poll::Ready(Some(Ok(ret.into_entry())))
@@ -546,7 +547,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
             let off = block.offset()?;
             let len = block.length()?;
 
-            if len != 0 && (size - remaining) % 512 != 0 {
+            if len != 0 && (size - remaining) % BLOCK_SIZE != 0 {
                 return Err(other(
                     "previous block in sparse file was not \
                      aligned to 512-byte boundary",
@@ -597,7 +598,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                     Err(err) => return Poll::Ready(Err(err)),
                 }
 
-                *next += 512;
+                *next += BLOCK_SIZE;
                 for block in ext.sparse.iter() {
                     add_block(block)?;
                 }
