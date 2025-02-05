@@ -216,26 +216,35 @@ fn extended_numeric_format() {
     let mut h: GnuHeader = unsafe { mem::zeroed() };
     h.as_header_mut().set_size(42);
     assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 50, 0]);
-    h.as_header_mut().set_size(8_589_934_593);
+    h.as_header_mut().set_size(8589934593);
     assert_eq!(h.size, [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 1]);
+    h.as_header_mut().set_size(44);
+    assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 52, 0]);
     h.size = [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0];
-    assert_eq!(h.as_header().entry_size().unwrap(), 0x0002_0000_0000);
+    assert_eq!(h.as_header().entry_size().unwrap(), 0x0200000000);
     h.size = [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 51, 0];
     assert_eq!(h.as_header().entry_size().unwrap(), 43);
 
     h.as_header_mut().set_gid(42);
     assert_eq!(h.gid, [48, 48, 48, 48, 48, 53, 50, 0]);
     assert_eq!(h.as_header().gid().unwrap(), 42);
-    h.as_header_mut().set_gid(0x7fff_ffff_ffff_ffff);
+    h.as_header_mut().set_gid(0x7fffffffffffffff);
     assert_eq!(h.gid, [0xff; 8]);
-    assert_eq!(h.as_header().gid().unwrap(), 0x7fff_ffff_ffff_ffff);
+    assert_eq!(h.as_header().gid().unwrap(), 0x7fffffffffffffff);
     h.uid = [0x80, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78];
-    assert_eq!(h.as_header().uid().unwrap(), 0x1234_5678);
+    assert_eq!(h.as_header().uid().unwrap(), 0x12345678);
 
     h.mtime = [
         0x80, 0, 0, 0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
     ];
-    assert_eq!(h.as_header().mtime().unwrap(), 0x0123_4567_89ab_cdef);
+    assert_eq!(h.as_header().mtime().unwrap(), 0x0123456789abcdef);
+
+    h.realsize = [0x80, 0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde];
+    assert_eq!(h.real_size().unwrap(), 0x00123456789abcde);
+    h.sparse[0].offset = [0x80, 0, 0, 0, 0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd];
+    assert_eq!(h.sparse[0].offset().unwrap(), 0x000123456789abcd);
+    h.sparse[0].numbytes = [0x80, 0, 0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    assert_eq!(h.sparse[0].length().unwrap(), 0x0000123456789abc);
 }
 
 #[test]
