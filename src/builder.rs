@@ -1,8 +1,8 @@
 use crate::{
-    header::{bytes2path, path2bytes, HeaderMode},
+    header::{path2bytes, HeaderMode},
     other, EntryType, Header,
 };
-use std::{borrow::Cow, fs::Metadata, path::Path};
+use std::{fs::Metadata, path::Path, str};
 use tokio::{
     fs,
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
@@ -504,8 +504,59 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
         .await?;
         Ok(())
     } else {
-        Err(other(&format!("{} has unknown file type", path.display())))
+        #[cfg(unix)]
+        {
+            append_special(dst, path, &stat, mode).await
+        }
+        #[cfg(not(unix))]
+        {
+            Err(other(&format!("{} has unknown file type", path.display())))
+        }
     }
+}
+
+#[cfg(unix)]
+async fn append_special<Dst: Write + Unpin + ?Sized>(
+    dst: &mut Dst,
+    path: &Path,
+    stat: &Metadata,
+    mode: HeaderMode,
+) -> io::Result<()> {
+    use ::std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let file_type = stat.file_type();
+    let entry_type;
+    if file_type.is_socket() {
+        // sockets can't be archived
+        return Err(other(&format!(
+            "{}: socket can not be archived",
+            path.display()
+        )));
+    } else if file_type.is_fifo() {
+        entry_type = EntryType::Fifo;
+    } else if file_type.is_char_device() {
+        entry_type = EntryType::Char;
+    } else if file_type.is_block_device() {
+        entry_type = EntryType::Block;
+    } else {
+        return Err(other(&format!("{} has unknown file type", path.display())));
+    }
+
+    let mut header = Header::new_gnu();
+    header.set_metadata_in_mode(stat, mode);
+    prepare_header_path(dst, &mut header, path).await?;
+
+    header.set_entry_type(entry_type);
+    let dev_id = stat.rdev();
+    let dev_major = ((dev_id >> 32) & 0xffff_f000) | ((dev_id >> 8) & 0x0000_0fff);
+    let dev_minor = ((dev_id >> 12) & 0xffff_ff00) | ((dev_id) & 0x0000_00ff);
+    header.set_device_major(dev_major as u32)?;
+    header.set_device_minor(dev_minor as u32)?;
+
+    header.set_cksum();
+    dst.write_all(header.as_bytes()).await?;
+
+    Ok(())
 }
 
 async fn append_file<Dst: Write + Unpin + ?Sized>(
@@ -566,10 +617,17 @@ async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
         // null-terminated string
         let mut data2 = data.chain(io::repeat(0).take(1));
         append(dst, &header2, &mut data2).await?;
+
         // Truncate the path to store in the header we're about to emit to
-        // ensure we've got something at least mentioned.
-        let path = bytes2path(Cow::Borrowed(&data[..max]))?;
-        header.set_path(&path)?;
+        // ensure we've got something at least mentioned. Note that we use
+        // `str`-encoding to be compatible with Windows, but in general the
+        // entry in the header itself shouldn't matter too much since extraction
+        // doesn't look at it.
+        let truncated = match str::from_utf8(&data[..max]) {
+            Ok(s) => s,
+            Err(e) => str::from_utf8(&data[..e.valid_up_to()]).unwrap(),
+        };
+        header.set_truncated_path_for_gnu_header(truncated)?;
     }
     Ok(())
 }
@@ -640,6 +698,14 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
             let link_name = fs::read_link(&src).await?;
             append_fs(dst, &dest, &stat, &mut io::empty(), mode, Some(&link_name)).await?;
         } else {
+            #[cfg(unix)]
+            {
+                let stat = fs::metadata(&src).await?;
+                if !stat.is_file() {
+                    append_special(dst, &dest, &stat, mode).await?;
+                    continue;
+                }
+            }
             append_file(dst, &dest, &mut fs::File::open(src).await?, mode).await?;
         }
     }

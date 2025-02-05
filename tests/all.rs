@@ -145,7 +145,9 @@ async fn writing_files() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     t!(ar
         .append_file("test2", &mut t!(File::open(&path).await))
@@ -171,7 +173,9 @@ async fn large_filename() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     let filename = "abcd/".repeat(50);
     let mut header = Header::new_ustar();
@@ -214,6 +218,37 @@ async fn large_filename() {
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
 
+    assert!(entries.next().await.is_none());
+}
+
+// This test checks very particular scenario where a path component starting
+// with ".." of a long path gets split at 100-byte mark so that ".." part goes
+// into header and gets interpreted as parent dir (and rejected) .
+#[tokio::test]
+async fn large_filename_with_dot_dot_at_100_byte_mark() {
+    let mut ar = Builder::new(Vec::new());
+
+    let mut header = Header::new_gnu();
+    header.set_mode(0o644);
+    header.set_size(4);
+
+    let mut long_name_with_dot_dot = "tdir/".repeat(19);
+    long_name_with_dot_dot.push_str("tt/..file");
+
+    t!(ar
+        .append_data(&mut header, &long_name_with_dot_dot, b"test".as_slice())
+        .await);
+
+    let rd = Cursor::new(t!(ar.into_inner().await));
+    let mut ar = Archive::new(rd);
+    let mut entries = t!(ar.entries());
+
+    let mut f = t!(entries.next().await.unwrap());
+    assert_eq!(&*f.path_bytes(), long_name_with_dot_dot.as_bytes());
+    assert_eq!(f.header().size().unwrap(), 4);
+    let mut s = String::new();
+    t!(f.read_to_string(&mut s).await);
+    assert_eq!(s, "test");
     assert!(entries.next().await.is_none());
 }
 
@@ -267,6 +302,80 @@ async fn extracting_directories() {
 }
 
 #[tokio::test]
+async fn extracting_duplicate_file_fail() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let path_present = td.path().join("a");
+    let mut file = t!(File::create(path_present).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
+
+    let rdr = Cursor::new(tar!("reading_files.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(false);
+    let mut ar = builder.build();
+    if let Err(err) = ar.unpack(td.path()).await {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            // as expected with overwrite false
+            return;
+        }
+        panic!("unexpected error: {:?}", err);
+    }
+    panic!(
+        "unpack() should have returned an error of kind {:?}, returned Ok",
+        std::io::ErrorKind::AlreadyExists
+    )
+}
+
+#[tokio::test]
+async fn extracting_duplicate_file_succeed() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let path_present = td.path().join("a");
+    let mut file = t!(File::create(path_present).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
+
+    let rdr = Cursor::new(tar!("reading_files.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(true);
+    let mut ar = builder.build();
+    t!(ar.unpack(td.path()).await);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn extracting_duplicate_link_fail() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let path_present = td.path().join("lnk");
+    t!(std::os::unix::fs::symlink("file", path_present));
+
+    let rdr = Cursor::new(tar!("link.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(false);
+    let mut ar = builder.build();
+    if let Err(err) = ar.unpack(td.path()).await {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            // as expected with overwrite false
+            return;
+        }
+        panic!("unexpected error: {:?}", err);
+    }
+    panic!(
+        "unpack() should have returned an error of kind {:?}, returned Ok",
+        std::io::ErrorKind::AlreadyExists
+    )
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn extracting_duplicate_link_succeed() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let path_present = td.path().join("lnk");
+    t!(std::os::unix::fs::symlink("file", path_present));
+
+    let rdr = Cursor::new(tar!("link.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(true);
+    let mut ar = builder.build();
+    t!(ar.unpack(td.path()).await);
+}
+
+#[tokio::test]
 #[cfg(all(unix, feature = "xattr"))]
 async fn xattrs() {
     // If /tmp is a tmpfs, xattr will fail
@@ -308,7 +417,9 @@ async fn writing_and_extracting_directories() {
 
     let mut ar = Builder::new(Vec::new());
     let tmppath = td.path().join("tmpfile");
-    t!(t!(File::create(&tmppath).await).write_all(b"c").await);
+    let mut file = t!(File::create(&tmppath).await);
+    t!(file.write_all(b"c").await);
+    t!(file.flush().await);
     t!(ar.append_dir("a", ".").await);
     t!(ar.append_dir("a/b", ".").await);
     t!(ar
@@ -328,14 +439,14 @@ async fn writing_directories_recursively() {
 
     let base_dir = td.path().join("base");
     t!(fs::create_dir(&base_dir).await);
-    t!(t!(File::create(base_dir.join("file1")).await)
-        .write_all(b"file1")
-        .await);
+    let mut file1 = t!(File::create(base_dir.join("file1")).await);
+    t!(file1.write_all(b"file1").await);
+    t!(file1.flush().await);
     let sub_dir = base_dir.join("sub");
     t!(fs::create_dir(&sub_dir).await);
-    t!(t!(File::create(sub_dir.join("file2")).await)
-        .write_all(b"file2")
-        .await);
+    let mut file2 = t!(File::create(sub_dir.join("file2")).await);
+    t!(file2.write_all(b"file2").await);
+    t!(file2.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     t!(ar.append_dir_all("foobar", base_dir).await);
@@ -371,14 +482,14 @@ async fn append_dir_all_blank_dest() {
 
     let base_dir = td.path().join("base");
     t!(fs::create_dir(&base_dir).await);
-    t!(t!(File::create(base_dir.join("file1")).await)
-        .write_all(b"file1")
-        .await);
+    let mut file1 = t!(File::create(base_dir.join("file1")).await);
+    t!(file1.write_all(b"file1").await);
+    t!(file1.flush().await);
     let sub_dir = base_dir.join("sub");
     t!(fs::create_dir(&sub_dir).await);
-    t!(t!(File::create(sub_dir.join("file2")).await)
-        .write_all(b"file2")
-        .await);
+    let mut file2 = t!(File::create(sub_dir.join("file2")).await);
+    t!(file2.write_all(b"file2").await);
+    t!(file2.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     t!(ar.append_dir_all("", base_dir).await);
@@ -412,7 +523,9 @@ async fn append_dir_all_blank_dest() {
 async fn append_dir_all_does_not_work_on_non_directory() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     let result = ar.append_dir_all("test", path).await;
@@ -470,7 +583,9 @@ async fn handling_incorrect_file_size() {
     let mut ar = Builder::new(Vec::new());
 
     let path = td.path().join("tmpfile");
-    t!(File::create(&path).await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
     let mut file = t!(File::open(&path).await);
     let mut header = Header::new_old();
     t!(header.set_path("somepath"));
@@ -519,10 +634,25 @@ async fn extracting_malicious_tarball() {
         }
 
         append(&mut a, "/tmp/abs_evil.txt").await;
-        append(&mut a, "//tmp/abs_evil2.txt").await;
+        // std parse `//` as UNC path, see rust-lang/rust#100833
+        append(
+            &mut a,
+            #[cfg(not(windows))]
+            "//tmp/abs_evil2.txt",
+            #[cfg(windows)]
+            "C://tmp/abs_evil2.txt",
+        )
+        .await;
         append(&mut a, "///tmp/abs_evil3.txt").await;
         append(&mut a, "/./tmp/abs_evil4.txt").await;
-        append(&mut a, "//./tmp/abs_evil5.txt").await;
+        append(
+            &mut a,
+            #[cfg(not(windows))]
+            "//./tmp/abs_evil5.txt",
+            #[cfg(windows)]
+            "C://./tmp/abs_evil5.txt",
+        )
+        .await;
         append(&mut a, "///./tmp/abs_evil6.txt").await;
         append(&mut a, "/../tmp/rel_evil.txt").await;
         append(&mut a, "../rel_evil2.txt").await;
@@ -575,11 +705,19 @@ async fn extracting_malicious_tarball() {
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
+    assert!(fs::metadata(td.path().join("tmp/abs_evil2.txt"))
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false));
     assert!(fs::metadata(td.path().join("tmp/abs_evil3.txt"))
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
     assert!(fs::metadata(td.path().join("tmp/abs_evil4.txt"))
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false));
+    assert!(fs::metadata(td.path().join("tmp/abs_evil5.txt"))
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
@@ -735,6 +873,10 @@ async fn unpack_links() {
 
     let md = t!(fs::symlink_metadata(td.path().join("lnk")).await);
     assert!(md.file_type().is_symlink());
+
+    let mtime = FileTime::from_last_modification_time(&md);
+    assert_eq!(mtime.unix_seconds(), 1448291033);
+
     assert_eq!(
         &*t!(fs::read_link(td.path().join("lnk")).await),
         Path::new("file")
@@ -944,6 +1086,32 @@ async fn extract_sparse() {
 }
 
 #[tokio::test]
+async fn large_sparse() {
+    let rdr = Cursor::new(tar!("sparse-large.tar"));
+    let mut ar = Archive::new(rdr);
+    let mut entries = t!(ar.entries());
+    // Only check the header info without extracting, as the file is very large,
+    // and not all filesystems support sparse files.
+    let a = t!(entries.next().await.unwrap());
+    let h = a.header().as_gnu().unwrap();
+    assert_eq!(h.real_size().unwrap(), 12626929280);
+}
+
+#[tokio::test]
+async fn sparse_with_trailing() {
+    let rdr = Cursor::new(tar!("sparse-1.tar"));
+    let mut ar = Archive::new(rdr);
+    let mut entries = t!(ar.entries());
+    let mut a = t!(entries.next().await.unwrap());
+    let mut s = String::new();
+    t!(a.read_to_string(&mut s).await);
+    assert_eq!(0x100_00c, s.len());
+    assert_eq!(&s[..0xc], "0MB through\n");
+    assert!(s[0xc..0x100_000].chars().all(|x| x == '\u{0}'));
+    assert_eq!(&s[0x100_000..], "1MB through\n");
+}
+
+#[tokio::test]
 async fn path_separators() {
     let mut ar = Builder::new(Vec::new());
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
@@ -1088,7 +1256,9 @@ async fn insert_local_file_different_name() {
         .await
         .unwrap();
     let path = td.path().join("file");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
     ar.append_path_with_name(&path, "archive/dir/f")
         .await
         .unwrap();
@@ -1100,10 +1270,6 @@ async fn insert_local_file_different_name() {
     assert_eq!(t!(entry.path()), Path::new("archive/dir"));
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), Path::new("archive/dir/f"));
-
-    // TODO(charlie): On macOS, `entries.next()` occasionally returns a `Some(Err(...))` here for
-    // an invalid checksum.
-    #[cfg(not(target_os = "macos"))]
     assert!(entries.next().await.is_none());
 }
 
@@ -1126,8 +1292,137 @@ async fn tar_directory_containing_symlink_to_directory() {
 
 #[tokio::test]
 async fn long_path() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let rdr = Cursor::new(tar!("7z_long_path.tar"));
     let mut ar = Archive::new(rdr);
     ar.unpack(td.path()).await.unwrap();
+}
+
+#[tokio::test]
+async fn unpack_path_larger_than_windows_max_path() {
+    let dir_name = "iamaprettylongnameandtobepreciseiam91characterslongwhichsomethinkisreallylongandothersdonot";
+    // 183 character directory name
+    let really_long_path = format!("{}{}", dir_name, dir_name);
+    let td = t!(TempBuilder::new().prefix(&really_long_path).tempdir());
+    // directory in 7z_long_path.tar is over 100 chars
+    let rdr = Cursor::new(tar!("7z_long_path.tar"));
+    let mut ar = Archive::new(rdr);
+    // should unpack path greater than windows MAX_PATH length of 260 characters
+    assert!(ar.unpack(td.path()).await.is_ok());
+}
+
+#[tokio::test]
+async fn append_long_multibyte() {
+    let mut x = Builder::new(Vec::new());
+    let mut name = String::new();
+    let data: &[u8] = &[];
+    for _ in 0..512 {
+        name.push('a');
+        name.push('𑢮');
+        x.append_data(&mut Header::new_gnu(), &name, data)
+            .await
+            .unwrap();
+        name.pop();
+    }
+}
+
+#[tokio::test]
+async fn read_only_directory_containing_files() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+
+    let mut b = Builder::new(Vec::<u8>::new());
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("dir/"));
+    h.set_size(0);
+    h.set_entry_type(EntryType::dir());
+    h.set_mode(0o444);
+    h.set_cksum();
+    t!(b.append(&h, "".as_bytes()).await);
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("dir/file"));
+    h.set_size(2);
+    h.set_entry_type(EntryType::file());
+    h.set_cksum();
+    t!(b.append(&h, "hi".as_bytes()).await);
+
+    let contents = t!(b.into_inner().await);
+    let mut ar = Archive::new(&contents[..]);
+    assert!(ar.unpack(td.path()).await.is_ok());
+}
+
+// This test was marked linux only due to macOS CI can't handle `set_current_dir` correctly
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn tar_directory_containing_special_files() {
+    use std::env;
+    use std::ffi::CString;
+
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let fifo = td.path().join("fifo");
+
+    unsafe {
+        let fifo_path = t!(CString::new(fifo.to_str().unwrap()));
+        let ret = libc::mknod(fifo_path.as_ptr(), libc::S_IFIFO | 0o644, 0);
+        if ret != 0 {
+            libc::perror(fifo_path.as_ptr());
+            panic!("Failed to create a FIFO file");
+        }
+    }
+
+    t!(env::set_current_dir(td.path()));
+    let mut ar = Builder::new(Vec::new());
+    // append_path has a different logic for processing files, so we need to test it as well
+    t!(ar.append_path("fifo").await);
+    t!(ar.append_dir_all("special", td.path()).await);
+    t!(env::set_current_dir("/dev/"));
+    // CI systems seem to have issues with creating a chr device
+    t!(ar.append_path("null").await);
+    t!(ar.finish().await);
+}
+
+#[tokio::test]
+async fn header_size_overflow() {
+    // maximal file size doesn't overflow anything
+    let mut ar = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(u64::MAX);
+    header.set_cksum();
+    t!(ar.append(&header, "x".as_bytes()).await);
+    let result = t!(ar.into_inner().await);
+    let mut ar = Archive::new(&result[..]);
+    let mut e = t!(ar.entries());
+    let entry = e.next().await.unwrap();
+    assert!(entry.is_err(), "expected error for size overflow");
+    let err = entry.unwrap_err();
+    assert!(
+        err.to_string().contains("size overflow"),
+        "bad error: {}",
+        err
+    );
+
+    // back-to-back entries that would overflow also don't panic
+    let mut ar = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(1_000);
+    header.set_cksum();
+    t!(ar.append(&header, &[0u8; 1_000][..]).await);
+    let mut header = Header::new_gnu();
+    header.set_size(u64::MAX - 513);
+    header.set_cksum();
+    t!(ar.append(&header, "x".as_bytes()).await);
+    let result = t!(ar.into_inner().await);
+    let mut ar = Archive::new(&result[..]);
+    let mut e = t!(ar.entries());
+    let first = e.next().await.unwrap();
+    t!(first); // First entry should be ok
+    let second = e.next().await.unwrap();
+    assert!(second.is_err(), "expected error for size overflow");
+    let err = second.unwrap_err();
+    assert!(
+        err.to_string().contains("size overflow"),
+        "bad error: {}",
+        err
+    );
 }

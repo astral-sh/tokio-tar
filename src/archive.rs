@@ -15,6 +15,7 @@ use tokio::{
 };
 use tokio_stream::*;
 
+use crate::header::BLOCK_SIZE;
 use crate::{
     entry::{EntryFields, EntryIo},
     error::TarError,
@@ -43,6 +44,7 @@ pub struct ArchiveInner<R> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    overwrite: bool,
     ignore_zeros: bool,
     obj: Mutex<R>,
 }
@@ -53,6 +55,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    overwrite: bool,
     ignore_zeros: bool,
 }
 
@@ -63,6 +66,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             unpack_xattrs: false,
             preserve_permissions: false,
             preserve_mtime: true,
+            overwrite: true,
             ignore_zeros: false,
             obj,
         }
@@ -90,6 +94,12 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Indicate whether files and symlinks should be overwritten on extraction.
+    pub fn set_overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
+        self
+    }
+
     /// Indicate whether access time information is preserved when unpacking
     /// this entry.
     ///
@@ -114,6 +124,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             unpack_xattrs,
             preserve_permissions,
             preserve_mtime,
+            overwrite,
             ignore_zeros,
             obj,
         } = self;
@@ -123,6 +134,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 unpack_xattrs,
                 preserve_permissions,
                 preserve_mtime,
+                overwrite,
                 ignore_zeros,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
@@ -139,6 +151,7 @@ impl<R: Read + Unpin> Archive<R> {
                 unpack_xattrs: false,
                 preserve_permissions: false,
                 preserve_mtime: true,
+                overwrite: true,
                 ignore_zeros: false,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
@@ -230,7 +243,7 @@ impl<R: Read + Unpin> Archive<R> {
         if fs::symlink_metadata(dst).await.is_err() {
             fs::create_dir_all(&dst)
                 .await
-                .map_err(|e| TarError::new(&format!("failed to create `{}`", dst.display()), e))?;
+                .map_err(|e| TarError::new(format!("failed to create `{}`", dst.display()), e))?;
         }
 
         // Canonicalizing the dst directory will prepend the path with '\\?\'
@@ -252,7 +265,7 @@ impl<R: Read + Unpin> Archive<R> {
             if file.header().entry_type() == crate::EntryType::Directory {
                 directories.push(file);
             } else {
-                file.unpack_in_memo(&dst, &mut targets).await?;
+                file.unpack_in_raw(&dst, &mut targets).await?;
             }
         }
 
@@ -265,7 +278,7 @@ impl<R: Read + Unpin> Archive<R> {
         // [0]: <https://github.com/alexcrichton/tar-rs/issues/242>
         directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
         for mut dir in directories {
-            dir.unpack_in_memo(&dst, &mut targets).await?;
+            dir.unpack_in_raw(&dst, &mut targets).await?;
         }
 
         Ok(())
@@ -435,7 +448,7 @@ fn poll_next_raw<R: Read + Unpin>(
         // Otherwise, check if we are ignoring zeros and continue, or break as if this is the
         // end of the archive.
         if !header.as_bytes().iter().all(|i| *i == 0) {
-            *next += 512;
+            *next += BLOCK_SIZE;
             break;
         }
 
@@ -443,7 +456,7 @@ fn poll_next_raw<R: Read + Unpin>(
             return Poll::Ready(None);
         }
 
-        *next += 512;
+        *next += BLOCK_SIZE;
         header_pos = *next;
     }
 
@@ -480,13 +493,18 @@ fn poll_next_raw<R: Read + Unpin>(
         unpack_xattrs: archive.inner.unpack_xattrs,
         preserve_permissions: archive.inner.preserve_permissions,
         preserve_mtime: archive.inner.preserve_mtime,
+        overwrite: archive.inner.overwrite,
         read_state: None,
     };
 
     // Store where the next entry is, rounding up by 512 bytes (the size of
     // a header);
-    let size = (size + 511) & !(512 - 1);
-    *next += size;
+    let size = size
+        .checked_add(BLOCK_SIZE - 1)
+        .ok_or_else(|| other("size overflow"))?;
+    *next = next
+        .checked_add(size & !(BLOCK_SIZE - 1))
+        .ok_or_else(|| other("size overflow"))?;
 
     Poll::Ready(Some(Ok(ret.into_entry())))
 }
@@ -542,7 +560,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
             let off = block.offset()?;
             let len = block.length()?;
 
-            if (size - remaining) % 512 != 0 {
+            if len != 0 && (size - remaining) % BLOCK_SIZE != 0 {
                 return Err(other(
                     "previous block in sparse file was not \
                      aligned to 512-byte boundary",
@@ -593,7 +611,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                     Err(err) => return Poll::Ready(Err(err)),
                 }
 
-                *next += 512;
+                *next += BLOCK_SIZE;
                 for block in ext.sparse.iter() {
                     add_block(block)?;
                 }

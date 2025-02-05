@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{
     fs,
-    fs::{remove_dir_all, remove_file, OpenOptions},
+    fs::{remove_file, OpenOptions},
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
@@ -53,6 +53,7 @@ pub struct EntryFields<R: Read + Unpin> {
     pub unpack_xattrs: bool,
     pub preserve_permissions: bool,
     pub preserve_mtime: bool,
+    pub overwrite: bool,
     pub(crate) read_state: Option<EntryIo<R>>,
 }
 
@@ -275,16 +276,17 @@ impl<R: Read + Unpin> Entry<R> {
     /// # Ok(()) }) }
     /// ```
     pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
-        self.fields
-            .unpack_in(dst.as_ref(), &mut FxHashSet::default())
-            .await
+        let dst = dst.as_ref().canonicalize()?;
+        let mut memo = FxHashSet::default();
+        self.fields.unpack_in(&dst, &mut memo).await
     }
 
     /// Extracts this file under the specified path, avoiding security issues.
     ///
     /// Like [`unpack_in`], but memoizes the set of validated paths to avoid
-    /// redundant filesystem operations.
-    pub async fn unpack_in_memo<P: AsRef<Path>>(
+    /// redundant filesystem operations and assumes that the destination path
+    /// is already canonicalized.
+    pub async fn unpack_in_raw<P: AsRef<Path>>(
         &mut self,
         dst: P,
         memo: &mut FxHashSet<PathBuf>,
@@ -473,7 +475,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         {
             let path = self.path().map_err(|e| {
                 TarError::new(
-                    &format!("invalid path in entry header: {}", self.path_lossy()),
+                    format!("invalid path in entry header: {}", self.path_lossy()),
                     e,
                 )
             })?;
@@ -510,7 +512,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Validate the parent, if we haven't seen it yet.
         if !memo.contains(parent) {
             self.ensure_dir_created(dst, parent).await.map_err(|e| {
-                TarError::new(&format!("failed to create `{}`", parent.display()), e)
+                TarError::new(format!("failed to create `{}`", parent.display()), e)
             })?;
             self.validate_inside_dst(dst, parent).await?;
             memo.insert(parent.to_path_buf());
@@ -518,7 +520,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         self.unpack(Some(dst), &file_dst)
             .await
-            .map_err(|e| TarError::new(&format!("failed to unpack `{}`", file_dst.display()), e))?;
+            .map_err(|e| TarError::new(format!("failed to unpack `{}`", file_dst.display()), e))?;
 
         Ok(Some(file_dst))
     }
@@ -545,6 +547,19 @@ impl<R: Read + Unpin> EntryFields<R> {
 
     /// Returns access to the header of this entry in the archive.
     async fn unpack(&mut self, target_base: Option<&Path>, dst: &Path) -> io::Result<Unpacked> {
+        fn get_mtime(header: &Header) -> Option<FileTime> {
+            header.mtime().ok().map(|mtime| {
+                // For some more information on this see the comments in
+                // `Header::fill_platform_from`, but the general idea is that
+                // we're trying to avoid 0-mtime files coming out of archives
+                // since some tools don't ingest them well. Perhaps one day
+                // when Cargo stops working with 0-mtime archives we can remove
+                // this.
+                let mtime = if mtime == 0 { 1 } else { mtime };
+                FileTime::from_unix_time(mtime as i64, 0)
+            })
+        }
+
         let kind = self.header.entry_type();
 
         if kind.is_dir() {
@@ -571,40 +586,6 @@ impl<R: Read + Unpin> EntryFields<R> {
                     "symlink destination for {} is empty",
                     String::from_utf8_lossy(self.header.as_bytes())
                 )));
-            }
-
-            if let Ok(metadata) = fs::metadata(dst).await {
-                let result = if metadata.is_symlink() || !metadata.is_dir() {
-                    remove_file(dst).await
-                } else {
-                    remove_dir_all(dst).await
-                };
-
-                result.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when removing existing entity for linking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
-            }
-
-            if fs::symlink_metadata(dst).await.is_ok() {
-                remove_file(dst).await.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when removing existing symlink for linking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
             }
 
             if kind.is_hard_link() {
@@ -639,17 +620,29 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
-                symlink(&src, dst).await.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when symlinking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
+                match symlink(&src, dst).await {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::AlreadyExists && self.overwrite {
+                            match remove_file(dst).await {
+                                Ok(()) => symlink(&src, dst).await,
+                                Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+                                    symlink(&src, dst).await
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }?;
+                if self.preserve_mtime {
+                    if let Some(mtime) = get_mtime(&self.header) {
+                        filetime::set_symlink_file_times(dst, mtime, mtime).map_err(|e| {
+                            TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
+                        })?;
+                    }
+                }
             };
             return Ok(Unpacked::Other);
 
@@ -667,7 +660,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     .unwrap()
             }
 
-            #[cfg(any(unix, target_os = "redox"))]
+            #[cfg(unix)]
             async fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
                 tokio::fs::symlink(src, dst).await
             }
@@ -715,14 +708,14 @@ impl<R: Read + Unpin> EntryFields<R> {
             let mut f = match open(dst).await {
                 Ok(f) => Ok(f),
                 Err(err) => {
-                    if err.kind() != ErrorKind::AlreadyExists {
-                        Err(err)
-                    } else {
+                    if err.kind() == ErrorKind::AlreadyExists && self.overwrite {
                         match fs::remove_file(dst).await {
                             Ok(()) => open(dst).await,
                             Err(ref e) if e.kind() == io::ErrorKind::NotFound => open(dst).await,
                             Err(e) => Err(e),
                         }
+                    } else {
+                        Err(err)
                     }
                 }
             }?;
@@ -755,7 +748,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         .map_err(|e| {
             let header = self.header.path_bytes();
             TarError::new(
-                &format!(
+                format!(
                     "failed to unpack `{}` into `{}`",
                     String::from_utf8_lossy(&header),
                     dst.display()
@@ -765,10 +758,9 @@ impl<R: Read + Unpin> EntryFields<R> {
         })?;
 
         if self.preserve_mtime {
-            if let Ok(mtime) = self.header.mtime() {
-                let mtime = FileTime::from_unix_time(mtime as i64, 0);
+            if let Some(mtime) = get_mtime(&self.header) {
                 filetime::set_file_times(dst, mtime, mtime).map_err(|e| {
-                    TarError::new(&format!("failed to set mtime for `{}`", dst.display()), e)
+                    TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
                 })?;
             }
         }
@@ -789,7 +781,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         ) -> Result<(), TarError> {
             _set_perms(dst, f, mode).await.map_err(|e| {
                 TarError::new(
-                    &format!(
+                    format!(
                         "failed to set permissions to {:o} \
                          for `{}`",
                         mode,
@@ -800,7 +792,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             })
         }
 
-        #[cfg(any(unix, target_os = "redox"))]
+        #[cfg(unix)]
         async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             use std::os::unix::prelude::*;
 
@@ -852,18 +844,14 @@ impl<R: Read + Unpin> EntryFields<R> {
                 .filter_map(|e| {
                     let key = e.key_bytes();
                     let prefix = b"SCHILY.xattr.";
-                    if key.starts_with(prefix) {
-                        Some((&key[prefix.len()..], e))
-                    } else {
-                        None
-                    }
+                    key.strip_prefix(prefix).map(|rest| (rest, e))
                 })
                 .map(|(key, e)| (OsStr::from_bytes(key), e.value_bytes()));
 
             for (key, value) in exts {
                 xattr::set(dst, key, value).map_err(|e| {
                     TarError::new(
-                        &format!(
+                        format!(
                             "failed to set extended \
                              attributes to {}. \
                              Xattrs: key={:?}, value={:?}.",
@@ -880,12 +868,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
         // Windows does not completely support posix xattrs
         // https://en.wikipedia.org/wiki/Extended_file_attributes#Windows_NT
-        #[cfg(any(
-            windows,
-            target_os = "redox",
-            not(feature = "xattr"),
-            target_arch = "wasm32"
-        ))]
+        #[cfg(any(windows, not(feature = "xattr"), target_arch = "wasm32"))]
         async fn set_xattrs<R: Read + Unpin>(_: &mut EntryFields<R>, _: &Path) -> io::Result<()> {
             Ok(())
         }
@@ -906,7 +889,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             if let Some(parent) = ancestor.parent() {
                 self.validate_inside_dst(dst, parent).await?;
             }
-            fs::create_dir(ancestor).await?;
+            fs::create_dir_all(ancestor).await?;
         }
         Ok(())
     }
@@ -921,7 +904,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         })?;
         if !canon_parent.starts_with(dst) {
             let err = TarError::new(
-                &format!(
+                format!(
                     "trying to unpack outside of destination path: {}",
                     dst.display()
                 ),
