@@ -1131,3 +1131,48 @@ async fn long_path() {
     let mut ar = Archive::new(rdr);
     ar.unpack(td.path()).await.unwrap();
 }
+
+#[tokio::test]
+async fn header_size_overflow() {
+    // maximal file size doesn't overflow anything
+    let mut ar = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(u64::MAX);
+    header.set_cksum();
+    t!(ar.append(&header, "x".as_bytes()).await);
+    let result = t!(ar.into_inner().await);
+    let mut ar = Archive::new(&result[..]);
+    let mut e = t!(ar.entries());
+    let entry = e.next().await.unwrap();
+    assert!(entry.is_err(), "expected error for size overflow");
+    let err = entry.unwrap_err();
+    assert!(
+        err.to_string().contains("size overflow"),
+        "bad error: {}",
+        err
+    );
+
+    // back-to-back entries that would overflow also don't panic
+    let mut ar = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(1_000);
+    header.set_cksum();
+    t!(ar.append(&header, &[0u8; 1_000][..]).await);
+    let mut header = Header::new_gnu();
+    header.set_size(u64::MAX - 513);
+    header.set_cksum();
+    t!(ar.append(&header, "x".as_bytes()).await);
+    let result = t!(ar.into_inner().await);
+    let mut ar = Archive::new(&result[..]);
+    let mut e = t!(ar.entries());
+    let first = e.next().await.unwrap();
+    t!(first); // First entry should be ok
+    let second = e.next().await.unwrap();
+    assert!(second.is_err(), "expected error for size overflow");
+    let err = second.unwrap_err();
+    assert!(
+        err.to_string().contains("size overflow"),
+        "bad error: {}",
+        err
+    );
+}
