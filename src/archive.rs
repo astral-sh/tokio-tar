@@ -43,6 +43,7 @@ pub struct ArchiveInner<R> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    overwrite: bool,
     ignore_zeros: bool,
     obj: Mutex<R>,
 }
@@ -53,6 +54,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    overwrite: bool,
     ignore_zeros: bool,
 }
 
@@ -63,6 +65,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             unpack_xattrs: false,
             preserve_permissions: false,
             preserve_mtime: true,
+            overwrite: true,
             ignore_zeros: false,
             obj,
         }
@@ -90,6 +93,12 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Indicate whether files and symlinks should be overwritten on extraction.
+    pub fn set_overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
+        self
+    }
+
     /// Indicate whether access time information is preserved when unpacking
     /// this entry.
     ///
@@ -114,6 +123,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             unpack_xattrs,
             preserve_permissions,
             preserve_mtime,
+            overwrite,
             ignore_zeros,
             obj,
         } = self;
@@ -123,6 +133,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 unpack_xattrs,
                 preserve_permissions,
                 preserve_mtime,
+                overwrite,
                 ignore_zeros,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
@@ -139,6 +150,7 @@ impl<R: Read + Unpin> Archive<R> {
                 unpack_xattrs: false,
                 preserve_permissions: false,
                 preserve_mtime: true,
+                overwrite: true,
                 ignore_zeros: false,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
@@ -480,6 +492,7 @@ fn poll_next_raw<R: Read + Unpin>(
         unpack_xattrs: archive.inner.unpack_xattrs,
         preserve_permissions: archive.inner.preserve_permissions,
         preserve_mtime: archive.inner.preserve_mtime,
+        overwrite: archive.inner.overwrite,
         read_state: None,
     };
 

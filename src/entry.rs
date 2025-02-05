@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{
     fs,
-    fs::{remove_dir_all, remove_file, OpenOptions},
+    fs::{remove_file, OpenOptions},
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
@@ -53,6 +53,7 @@ pub struct EntryFields<R: Read + Unpin> {
     pub unpack_xattrs: bool,
     pub preserve_permissions: bool,
     pub preserve_mtime: bool,
+    pub overwrite: bool,
     pub(crate) read_state: Option<EntryIo<R>>,
 }
 
@@ -574,40 +575,6 @@ impl<R: Read + Unpin> EntryFields<R> {
                 )));
             }
 
-            if let Ok(metadata) = fs::metadata(dst).await {
-                let result = if metadata.is_symlink() || !metadata.is_dir() {
-                    remove_file(dst).await
-                } else {
-                    remove_dir_all(dst).await
-                };
-
-                result.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when removing existing entity for linking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
-            }
-
-            if fs::symlink_metadata(dst).await.is_ok() {
-                remove_file(dst).await.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when removing existing symlink for linking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
-            }
-
             if kind.is_hard_link() {
                 let link_src = match target_base {
                     // If we're unpacking within a directory then ensure that
@@ -640,17 +607,22 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
-                symlink(&src, dst).await.map_err(|err| {
-                    Error::new(
-                        err.kind(),
-                        format!(
-                            "{} when symlinking {} to {}",
-                            err,
-                            src.display(),
-                            dst.display()
-                        ),
-                    )
-                })?;
+                match symlink(&src, dst).await {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::AlreadyExists && self.overwrite {
+                            match remove_file(dst).await {
+                                Ok(()) => symlink(&src, dst).await,
+                                Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+                                    symlink(&src, dst).await
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }?
             };
             return Ok(Unpacked::Other);
 
@@ -716,14 +688,14 @@ impl<R: Read + Unpin> EntryFields<R> {
             let mut f = match open(dst).await {
                 Ok(f) => Ok(f),
                 Err(err) => {
-                    if err.kind() != ErrorKind::AlreadyExists {
-                        Err(err)
-                    } else {
+                    if err.kind() == ErrorKind::AlreadyExists && self.overwrite {
                         match fs::remove_file(dst).await {
                             Ok(()) => open(dst).await,
                             Err(ref e) if e.kind() == io::ErrorKind::NotFound => open(dst).await,
                             Err(e) => Err(e),
                         }
+                    } else {
+                        Err(err)
                     }
                 }
             }?;
