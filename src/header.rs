@@ -3,11 +3,15 @@ use std::os::unix::prelude::*;
 #[cfg(windows)]
 use std::os::windows::prelude::*;
 
-use std::{borrow::Cow, fmt, iter, iter::repeat, mem, str};
-
 use std::{
+    borrow::Cow,
+    fmt,
     fs::Metadata,
+    iter,
+    iter::{once, repeat},
+    mem,
     path::{Component, Path, PathBuf},
+    str,
 };
 use tokio::io;
 
@@ -1386,8 +1390,8 @@ fn octal_from(slice: &[u8]) -> io::Result<u64> {
 
 fn octal_into<T: fmt::Octal>(dst: &mut [u8], val: T) {
     let o = format!("{:o}", val);
-    let value = o.bytes().rev().chain(repeat(b'0'));
-    for (slot, value) in dst.iter_mut().rev().skip(1).zip(value) {
+    let value = once(b'\0').chain(o.bytes().rev().chain(repeat(b'0')));
+    for (slot, value) in dst.iter_mut().rev().zip(value) {
         *slot = value;
     }
 }
