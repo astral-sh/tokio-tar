@@ -1,4 +1,4 @@
-#[cfg(any(unix, target_os = "redox"))]
+#[cfg(unix)]
 use std::os::unix::prelude::*;
 #[cfg(windows)]
 use std::os::windows::prelude::*;
@@ -716,7 +716,7 @@ impl Header {
         unimplemented!();
     }
 
-    #[cfg(any(unix, target_os = "redox"))]
+    #[cfg(unix)]
     fn fill_platform_from(&mut self, meta: &Metadata, mode: HeaderMode) {
         match mode {
             HeaderMode::Complete => {
@@ -752,7 +752,6 @@ impl Header {
         // TODO: need to bind more file types
         self.set_entry_type(entry_type(meta.mode()));
 
-        #[cfg(not(target_os = "redox"))]
         fn entry_type(mode: u32) -> EntryType {
             match mode as libc::mode_t & libc::S_IFMT {
                 libc::S_IFREG => EntryType::file(),
@@ -761,17 +760,6 @@ impl Header {
                 libc::S_IFBLK => EntryType::block_special(),
                 libc::S_IFDIR => EntryType::dir(),
                 libc::S_IFIFO => EntryType::fifo(),
-                _ => EntryType::new(b' '),
-            }
-        }
-
-        #[cfg(target_os = "redox")]
-        fn entry_type(mode: u32) -> EntryType {
-            use syscall;
-            match mode as u16 & syscall::MODE_TYPE {
-                syscall::MODE_FILE => EntryType::file(),
-                syscall::MODE_SYMLINK => EntryType::symlink(),
-                syscall::MODE_DIR => EntryType::dir(),
                 _ => EntryType::new(b' '),
             }
         }
@@ -1537,7 +1525,7 @@ fn ends_with_slash(p: &Path) -> bool {
     last == Some(b'/' as u16) || last == Some(b'\\' as u16)
 }
 
-#[cfg(any(unix, target_os = "redox"))]
+#[cfg(unix)]
 fn ends_with_slash(p: &Path) -> bool {
     p.as_os_str().as_bytes().ends_with(b"/")
 }
@@ -1564,7 +1552,7 @@ pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
         })
 }
 
-#[cfg(any(unix, target_os = "redox"))]
+#[cfg(unix)]
 /// On unix this will never fail
 pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
     Ok(Cow::Borrowed(p.as_os_str().as_bytes()))
@@ -1593,7 +1581,7 @@ pub fn bytes2path(bytes: Cow<[u8]>) -> io::Result<Cow<Path>> {
     }
 }
 
-#[cfg(any(unix, target_os = "redox"))]
+#[cfg(unix)]
 /// On unix this operation can never fail.
 pub fn bytes2path(bytes: Cow<'_, [u8]>) -> io::Result<Cow<'_, Path>> {
     use std::ffi::{OsStr, OsString};
