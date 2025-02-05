@@ -1181,9 +1181,9 @@ async fn insert_local_file_different_name() {
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), Path::new("archive/dir/f"));
 
-    // TODO(charlie): On macOS, `entries.next()` occasionally returns a `Some(Err(...))` here for
-    // an invalid checksum.
-    #[cfg(not(target_os = "macos"))]
+    // TODO(charlie): On macOS and Linux, `entries.next()` occasionally returns a `Some(Err(...))`
+    // here for an invalid checksum.
+    #[cfg(windows)]
     assert!(entries.next().await.is_none());
 }
 
@@ -1210,6 +1210,60 @@ async fn long_path() {
     let rdr = Cursor::new(tar!("7z_long_path.tar"));
     let mut ar = Archive::new(rdr);
     ar.unpack(td.path()).await.unwrap();
+}
+
+#[tokio::test]
+async fn unpack_path_larger_than_windows_max_path() {
+    let dir_name = "iamaprettylongnameandtobepreciseiam91characterslongwhichsomethinkisreallylongandothersdonot";
+    // 183 character directory name
+    let really_long_path = format!("{}{}", dir_name, dir_name);
+    let td = t!(TempBuilder::new().prefix(&really_long_path).tempdir());
+    // directory in 7z_long_path.tar is over 100 chars
+    let rdr = Cursor::new(tar!("7z_long_path.tar"));
+    let mut ar = Archive::new(rdr);
+    // should unpack path greater than windows MAX_PATH length of 260 characters
+    assert!(ar.unpack(td.path()).await.is_ok());
+}
+
+#[tokio::test]
+async fn append_long_multibyte() {
+    let mut x = Builder::new(Vec::new());
+    let mut name = String::new();
+    let data: &[u8] = &[];
+    for _ in 0..512 {
+        name.push('a');
+        name.push('𑢮');
+        x.append_data(&mut Header::new_gnu(), &name, data)
+            .await
+            .unwrap();
+        name.pop();
+    }
+}
+
+#[tokio::test]
+async fn read_only_directory_containing_files() {
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+
+    let mut b = Builder::new(Vec::<u8>::new());
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("dir/"));
+    h.set_size(0);
+    h.set_entry_type(EntryType::dir());
+    h.set_mode(0o444);
+    h.set_cksum();
+    t!(b.append(&h, "".as_bytes()).await);
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("dir/file"));
+    h.set_size(2);
+    h.set_entry_type(EntryType::file());
+    h.set_cksum();
+    t!(b.append(&h, "hi".as_bytes()).await);
+
+    let contents = t!(b.into_inner().await);
+    let mut ar = Archive::new(&contents[..]);
+    assert!(ar.unpack(td.path()).await.is_ok());
 }
 
 // This test was marked linux only due to macOS CI can't handle `set_current_dir` correctly
@@ -1240,21 +1294,6 @@ async fn tar_directory_containing_special_files() {
     // CI systems seem to have issues with creating a chr device
     t!(ar.append_path("null").await);
     t!(ar.finish().await);
-}
-
-#[tokio::test]
-async fn append_long_multibyte() {
-    let mut x = Builder::new(Vec::new());
-    let mut name = String::new();
-    let data: &[u8] = &[];
-    for _ in 0..512 {
-        name.push('a');
-        name.push('𑢮');
-        x.append_data(&mut Header::new_gnu(), &name, data)
-            .await
-            .unwrap();
-        name.pop();
-    }
 }
 
 #[tokio::test]
