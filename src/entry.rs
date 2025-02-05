@@ -907,7 +907,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             if let Some(parent) = ancestor.parent() {
                 self.validate_inside_dst(dst, parent).await?;
             }
-            fs::create_dir(ancestor).await?;
+            fs::create_dir_all(ancestor).await?;
         }
         Ok(())
     }
