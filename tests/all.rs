@@ -1168,7 +1168,9 @@ async fn insert_local_file_different_name() {
         .await
         .unwrap();
     let path = td.path().join("file");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
     ar.append_path_with_name(&path, "archive/dir/f")
         .await
         .unwrap();
@@ -1180,10 +1182,6 @@ async fn insert_local_file_different_name() {
     assert_eq!(t!(entry.path()), Path::new("archive/dir"));
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), Path::new("archive/dir/f"));
-
-    // TODO(charlie): On macOS and Linux, `entries.next()` occasionally returns a `Some(Err(...))`
-    // here for an invalid checksum.
-    #[cfg(windows)]
     assert!(entries.next().await.is_none());
 }
 
