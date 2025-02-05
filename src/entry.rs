@@ -668,7 +668,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     .unwrap()
             }
 
-            #[cfg(any(unix, target_os = "redox"))]
+            #[cfg(unix)]
             async fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
                 tokio::fs::symlink(src, dst).await
             }
@@ -801,7 +801,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             })
         }
 
-        #[cfg(any(unix, target_os = "redox"))]
+        #[cfg(unix)]
         async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             use std::os::unix::prelude::*;
 
@@ -877,12 +877,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
         // Windows does not completely support posix xattrs
         // https://en.wikipedia.org/wiki/Extended_file_attributes#Windows_NT
-        #[cfg(any(
-            windows,
-            target_os = "redox",
-            not(feature = "xattr"),
-            target_arch = "wasm32"
-        ))]
+        #[cfg(any(windows, not(feature = "xattr"), target_arch = "wasm32"))]
         async fn set_xattrs<R: Read + Unpin>(_: &mut EntryFields<R>, _: &Path) -> io::Result<()> {
             Ok(())
         }
