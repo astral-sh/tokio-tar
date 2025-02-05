@@ -1223,7 +1223,7 @@ impl GnuHeader {
     /// This is applicable for sparse files where the returned size here is the
     /// size of the entire file after the sparse regions have been filled in.
     pub fn real_size(&self) -> io::Result<u64> {
-        octal_from(&self.realsize).map_err(|err| {
+        num_field_wrapper_from(&self.realsize).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!(
@@ -1295,7 +1295,7 @@ impl GnuSparseHeader {
     ///
     /// Returns `Err` for a malformed `offset` field.
     pub fn offset(&self) -> io::Result<u64> {
-        octal_from(&self.offset).map_err(|err| {
+        num_field_wrapper_from(&self.offset).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!("{} when getting offset from sparse header", err),
@@ -1307,7 +1307,7 @@ impl GnuSparseHeader {
     ///
     /// Returns `Err` for a malformed `numbytes` field.
     pub fn length(&self) -> io::Result<u64> {
-        octal_from(&self.numbytes).map_err(|err| {
+        num_field_wrapper_from(&self.numbytes).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!("{} when getting length from sparse header", err),
