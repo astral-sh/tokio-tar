@@ -853,12 +853,16 @@ async fn links() {
 #[tokio::test]
 #[cfg(unix)] // making symlinks on windows is hard
 async fn unpack_links() {
-    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
     let mut ar = Archive::new(Cursor::new(tar!("link.tar")));
     t!(ar.unpack(td.path()).await);
 
     let md = t!(fs::symlink_metadata(td.path().join("lnk")).await);
     assert!(md.file_type().is_symlink());
+
+    let mtime = FileTime::from_last_modification_time(&md);
+    assert_eq!(mtime.unix_seconds(), 1448291033);
+
     assert_eq!(
         &*t!(fs::read_link(td.path().join("lnk")).await),
         Path::new("file")
