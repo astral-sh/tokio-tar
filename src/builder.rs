@@ -1,8 +1,8 @@
 use crate::{
-    header::{bytes2path, path2bytes, HeaderMode},
+    header::{path2bytes, HeaderMode},
     other, EntryType, Header,
 };
-use std::{borrow::Cow, fs::Metadata, path::Path};
+use std::{fs::Metadata, path::Path, str};
 use tokio::{
     fs,
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
@@ -617,10 +617,17 @@ async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
         // null-terminated string
         let mut data2 = data.chain(io::repeat(0).take(1));
         append(dst, &header2, &mut data2).await?;
+
         // Truncate the path to store in the header we're about to emit to
-        // ensure we've got something at least mentioned.
-        let path = bytes2path(Cow::Borrowed(&data[..max]))?;
-        header.set_path(&path)?;
+        // ensure we've got something at least mentioned. Note that we use
+        // `str`-encoding to be compatible with Windows, but in general the
+        // entry in the header itself shouldn't matter too much since extraction
+        // doesn't look at it.
+        let truncated = match str::from_utf8(&data[..max]) {
+            Ok(s) => s,
+            Err(e) => str::from_utf8(&data[..e.valid_up_to()]).unwrap(),
+        };
+        header.set_truncated_path_for_gnu_header(truncated)?;
     }
     Ok(())
 }
