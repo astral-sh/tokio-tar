@@ -1181,6 +1181,36 @@ async fn long_path() {
     ar.unpack(td.path()).await.unwrap();
 }
 
+// This test was marked linux only due to macOS CI can't handle `set_current_dir` correctly
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn tar_directory_containing_special_files() {
+    use std::env;
+    use std::ffi::CString;
+
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let fifo = td.path().join("fifo");
+
+    unsafe {
+        let fifo_path = t!(CString::new(fifo.to_str().unwrap()));
+        let ret = libc::mknod(fifo_path.as_ptr(), libc::S_IFIFO | 0o644, 0);
+        if ret != 0 {
+            libc::perror(fifo_path.as_ptr());
+            panic!("Failed to create a FIFO file");
+        }
+    }
+
+    t!(env::set_current_dir(td.path()));
+    let mut ar = Builder::new(Vec::new());
+    // append_path has a different logic for processing files, so we need to test it as well
+    t!(ar.append_path("fifo").await);
+    t!(ar.append_dir_all("special", td.path()).await);
+    t!(env::set_current_dir("/dev/"));
+    // CI systems seem to have issues with creating a chr device
+    t!(ar.append_path("null").await);
+    t!(ar.finish().await);
+}
+
 #[tokio::test]
 async fn header_size_overflow() {
     // maximal file size doesn't overflow anything
