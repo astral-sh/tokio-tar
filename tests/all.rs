@@ -944,6 +944,20 @@ async fn extract_sparse() {
 }
 
 #[tokio::test]
+async fn sparse_with_trailing() {
+    let rdr = Cursor::new(tar!("sparse-1.tar"));
+    let mut ar = Archive::new(rdr);
+    let mut entries = t!(ar.entries());
+    let mut a = t!(entries.next().await.unwrap());
+    let mut s = String::new();
+    t!(a.read_to_string(&mut s).await);
+    assert_eq!(0x100_00c, s.len());
+    assert_eq!(&s[..0xc], "0MB through\n");
+    assert!(s[0xc..0x100_000].chars().all(|x| x == '\u{0}'));
+    assert_eq!(&s[0x100_000..], "1MB through\n");
+}
+
+#[tokio::test]
 async fn path_separators() {
     let mut ar = Builder::new(Vec::new());
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
