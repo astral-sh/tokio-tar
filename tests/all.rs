@@ -519,10 +519,25 @@ async fn extracting_malicious_tarball() {
         }
 
         append(&mut a, "/tmp/abs_evil.txt").await;
-        append(&mut a, "//tmp/abs_evil2.txt").await;
+        // std parse `//` as UNC path, see rust-lang/rust#100833
+        append(
+            &mut a,
+            #[cfg(not(windows))]
+            "//tmp/abs_evil2.txt",
+            #[cfg(windows)]
+            "C://tmp/abs_evil2.txt",
+        )
+        .await;
         append(&mut a, "///tmp/abs_evil3.txt").await;
         append(&mut a, "/./tmp/abs_evil4.txt").await;
-        append(&mut a, "//./tmp/abs_evil5.txt").await;
+        append(
+            &mut a,
+            #[cfg(not(windows))]
+            "//./tmp/abs_evil5.txt",
+            #[cfg(windows)]
+            "C://./tmp/abs_evil5.txt",
+        )
+        .await;
         append(&mut a, "///./tmp/abs_evil6.txt").await;
         append(&mut a, "/../tmp/rel_evil.txt").await;
         append(&mut a, "../rel_evil2.txt").await;
@@ -575,11 +590,19 @@ async fn extracting_malicious_tarball() {
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
+    assert!(fs::metadata(td.path().join("tmp/abs_evil2.txt"))
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false));
     assert!(fs::metadata(td.path().join("tmp/abs_evil3.txt"))
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
     assert!(fs::metadata(td.path().join("tmp/abs_evil4.txt"))
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false));
+    assert!(fs::metadata(td.path().join("tmp/abs_evil5.txt"))
         .await
         .map(|m| m.is_file())
         .unwrap_or(false));
