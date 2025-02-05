@@ -298,6 +298,76 @@ async fn extracting_directories() {
 }
 
 #[tokio::test]
+async fn extracting_duplicate_file_fail() {
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let path_present = td.path().join("a");
+    t!(File::create(path_present).await);
+
+    let rdr = Cursor::new(tar!("reading_files.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(false);
+    let mut ar = builder.build();
+    if let Err(err) = ar.unpack(td.path()).await {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            // as expected with overwrite false
+            return;
+        }
+        panic!("unexpected error: {:?}", err);
+    }
+    panic!(
+        "unpack() should have returned an error of kind {:?}, returned Ok",
+        std::io::ErrorKind::AlreadyExists
+    )
+}
+
+#[tokio::test]
+async fn extracting_duplicate_file_succeed() {
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let path_present = td.path().join("a");
+    t!(File::create(path_present).await);
+
+    let rdr = Cursor::new(tar!("reading_files.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(true);
+    let mut ar = builder.build();
+    t!(ar.unpack(td.path()).await);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn extracting_duplicate_link_fail() {
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let path_present = td.path().join("lnk");
+    t!(std::os::unix::fs::symlink("file", path_present));
+
+    let rdr = Cursor::new(tar!("link.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(false);
+    let mut ar = builder.build();
+    if let Err(err) = ar.unpack(td.path()).await {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            // as expected with overwrite false
+            return;
+        }
+        panic!("unexpected error: {:?}", err);
+    }
+    panic!(
+        "unpack() should have returned an error of kind {:?}, returned Ok",
+        std::io::ErrorKind::AlreadyExists
+    )
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn extracting_duplicate_link_succeed() {
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let path_present = td.path().join("lnk");
+    t!(std::os::unix::fs::symlink("file", path_present));
+
+    let rdr = Cursor::new(tar!("link.tar"));
+    let builder = ArchiveBuilder::new(rdr).set_overwrite(true);
+    let mut ar = builder.build();
+    t!(ar.unpack(td.path()).await);
+}
+
+#[tokio::test]
 #[cfg(all(unix, feature = "xattr"))]
 async fn xattrs() {
     // If /tmp is a tmpfs, xattr will fail
