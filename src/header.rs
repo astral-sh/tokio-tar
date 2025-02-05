@@ -17,6 +17,14 @@ use tokio::io;
 
 use crate::{other, EntryType};
 
+/// A deterministic, arbitrary, non-zero timestamp that use used as `mtime`
+/// of headers when [`HeaderMode::Deterministic`] is used.
+///
+/// This value, chosen after careful deliberation, corresponds to _Jul 23, 2006_,
+/// which is the date of the first commit for what would become Rust.
+#[cfg(any(unix, windows))]
+const DETERMINISTIC_TIMESTAMP: u64 = 1153704088;
+
 /// Representation of the header of an entry in an archive
 #[repr(C)]
 #[allow(missing_docs)]
@@ -752,7 +760,12 @@ impl Header {
                 self.set_mode(meta.mode());
             }
             HeaderMode::Deterministic => {
-                self.set_mtime(0);
+                // We could in theory set the mtime to zero here, but not all tools seem to behave
+                // well when ingesting files with a 0 timestamp.
+                // For example, rust-lang/cargo#9512 shows that lldb doesn't ingest files with a
+                // zero timestamp correctly.
+                self.set_mtime(DETERMINISTIC_TIMESTAMP);
+
                 self.set_uid(0);
                 self.set_gid(0);
 
@@ -819,7 +832,7 @@ impl Header {
             HeaderMode::Deterministic => {
                 self.set_uid(0);
                 self.set_gid(0);
-                self.set_mtime(0);
+                self.set_mtime(DETERMINISTIC_TIMESTAMP); // see above in unix
                 let fs_mode = if meta.is_dir() { 0o755 } else { 0o644 };
                 self.set_mode(fs_mode);
             }
