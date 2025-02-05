@@ -361,7 +361,13 @@ impl Header {
     ///
     /// This function will set the pathname listed in this header, encoding it
     /// in the appropriate format. May fail if the path is too long or if the
-    /// path specified is not Unicode and this is a Windows platform.
+    /// path specified is not Unicode and this is a Windows platform. Will
+    /// strip out any "." path component, which signifies the current directory.
+    ///
+    /// Note: This function does not support names over 100 bytes, or paths
+    /// over 255 bytes, even for formats that support longer names. Instead,
+    /// use `Builder` methods to insert a long-name extension at the same time
+    /// as the file content.
     pub fn set_path<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
         self.set_path_inner(p.as_ref(), false)
     }
@@ -432,7 +438,8 @@ impl Header {
     ///
     /// This function will set the linkname listed in this header, encoding it
     /// in the appropriate format. May fail if the link name is too long or if
-    /// the path specified is not Unicode and this is a Windows platform.
+    /// the path specified is not Unicode and this is a Windows platform. Will
+    /// strip out any "." path component, which signifies the current directory.
     pub fn set_link_name<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
         self._set_link_name(p.as_ref())
     }
