@@ -485,8 +485,12 @@ fn poll_next_raw<R: Read + Unpin>(
 
     // Store where the next entry is, rounding up by 512 bytes (the size of
     // a header);
-    let size = (size + 511) & !(512 - 1);
-    *next += size;
+    let size = size
+        .checked_add(511)
+        .ok_or_else(|| other("size overflow"))?;
+    *next = next
+        .checked_add(size & !511)
+        .ok_or_else(|| other("size overflow"))?;
 
     Poll::Ready(Some(Ok(ret.into_entry())))
 }
