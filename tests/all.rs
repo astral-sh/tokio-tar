@@ -145,7 +145,9 @@ async fn writing_files() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     t!(ar
         .append_file("test2", &mut t!(File::open(&path).await))
@@ -171,7 +173,9 @@ async fn large_filename() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     let filename = "abcd/".repeat(50);
     let mut header = Header::new_ustar();
@@ -299,9 +303,11 @@ async fn extracting_directories() {
 
 #[tokio::test]
 async fn extracting_duplicate_file_fail() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path_present = td.path().join("a");
-    t!(File::create(path_present).await);
+    let mut file = t!(File::create(path_present).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
 
     let rdr = Cursor::new(tar!("reading_files.tar"));
     let builder = ArchiveBuilder::new(rdr).set_overwrite(false);
@@ -321,9 +327,11 @@ async fn extracting_duplicate_file_fail() {
 
 #[tokio::test]
 async fn extracting_duplicate_file_succeed() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path_present = td.path().join("a");
-    t!(File::create(path_present).await);
+    let mut file = t!(File::create(path_present).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
 
     let rdr = Cursor::new(tar!("reading_files.tar"));
     let builder = ArchiveBuilder::new(rdr).set_overwrite(true);
@@ -334,7 +342,7 @@ async fn extracting_duplicate_file_succeed() {
 #[tokio::test]
 #[cfg(unix)]
 async fn extracting_duplicate_link_fail() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path_present = td.path().join("lnk");
     t!(std::os::unix::fs::symlink("file", path_present));
 
@@ -357,7 +365,7 @@ async fn extracting_duplicate_link_fail() {
 #[tokio::test]
 #[cfg(unix)]
 async fn extracting_duplicate_link_succeed() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path_present = td.path().join("lnk");
     t!(std::os::unix::fs::symlink("file", path_present));
 
@@ -409,7 +417,9 @@ async fn writing_and_extracting_directories() {
 
     let mut ar = Builder::new(Vec::new());
     let tmppath = td.path().join("tmpfile");
-    t!(t!(File::create(&tmppath).await).write_all(b"c").await);
+    let mut file = t!(File::create(&tmppath).await);
+    t!(file.write_all(b"c").await);
+    t!(file.flush().await);
     t!(ar.append_dir("a", ".").await);
     t!(ar.append_dir("a/b", ".").await);
     t!(ar
@@ -429,14 +439,14 @@ async fn writing_directories_recursively() {
 
     let base_dir = td.path().join("base");
     t!(fs::create_dir(&base_dir).await);
-    t!(t!(File::create(base_dir.join("file1")).await)
-        .write_all(b"file1")
-        .await);
+    let mut file1 = t!(File::create(base_dir.join("file1")).await);
+    t!(file1.write_all(b"file1").await);
+    t!(file1.flush().await);
     let sub_dir = base_dir.join("sub");
     t!(fs::create_dir(&sub_dir).await);
-    t!(t!(File::create(sub_dir.join("file2")).await)
-        .write_all(b"file2")
-        .await);
+    let mut file2 = t!(File::create(sub_dir.join("file2")).await);
+    t!(file2.write_all(b"file2").await);
+    t!(file2.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     t!(ar.append_dir_all("foobar", base_dir).await);
@@ -472,14 +482,14 @@ async fn append_dir_all_blank_dest() {
 
     let base_dir = td.path().join("base");
     t!(fs::create_dir(&base_dir).await);
-    t!(t!(File::create(base_dir.join("file1")).await)
-        .write_all(b"file1")
-        .await);
+    let mut file1 = t!(File::create(base_dir.join("file1")).await);
+    t!(file1.write_all(b"file1").await);
+    t!(file1.flush().await);
     let sub_dir = base_dir.join("sub");
     t!(fs::create_dir(&sub_dir).await);
-    t!(t!(File::create(sub_dir.join("file2")).await)
-        .write_all(b"file2")
-        .await);
+    let mut file2 = t!(File::create(sub_dir.join("file2")).await);
+    t!(file2.write_all(b"file2").await);
+    t!(file2.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     t!(ar.append_dir_all("", base_dir).await);
@@ -513,7 +523,9 @@ async fn append_dir_all_blank_dest() {
 async fn append_dir_all_does_not_work_on_non_directory() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path = td.path().join("test");
-    t!(t!(File::create(&path).await).write_all(b"test").await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"test").await);
+    t!(file.flush().await);
 
     let mut ar = Builder::new(Vec::new());
     let result = ar.append_dir_all("test", path).await;
@@ -571,7 +583,9 @@ async fn handling_incorrect_file_size() {
     let mut ar = Builder::new(Vec::new());
 
     let path = td.path().join("tmpfile");
-    t!(File::create(&path).await);
+    let mut file = t!(File::create(&path).await);
+    t!(file.write_all(b"").await);
+    t!(file.flush().await);
     let mut file = t!(File::open(&path).await);
     let mut header = Header::new_old();
     t!(header.set_path("somepath"));
@@ -853,7 +867,7 @@ async fn links() {
 #[tokio::test]
 #[cfg(unix)] // making symlinks on windows is hard
 async fn unpack_links() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let mut ar = Archive::new(Cursor::new(tar!("link.tar")));
     t!(ar.unpack(td.path()).await);
 
@@ -1278,7 +1292,7 @@ async fn tar_directory_containing_symlink_to_directory() {
 
 #[tokio::test]
 async fn long_path() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let rdr = Cursor::new(tar!("7z_long_path.tar"));
     let mut ar = Archive::new(rdr);
     ar.unpack(td.path()).await.unwrap();
@@ -1314,7 +1328,7 @@ async fn append_long_multibyte() {
 
 #[tokio::test]
 async fn read_only_directory_containing_files() {
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
     let mut b = Builder::new(Vec::<u8>::new());
 
@@ -1345,7 +1359,7 @@ async fn tar_directory_containing_special_files() {
     use std::env;
     use std::ffi::CString;
 
-    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let fifo = td.path().join("fifo");
 
     unsafe {
