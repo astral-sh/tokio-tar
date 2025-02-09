@@ -348,15 +348,12 @@ impl<R: Read + Unpin> EntryFields<R> {
     pub(crate) fn poll_read_all(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<io::Result<Vec<u8>>> {
-        // Preallocate some data but don't let ourselves get too crazy now.
-        let cap = cmp::min(self.size, 128 * 1024);
-        let mut buf = Vec::with_capacity(cap as usize);
-
+        out: &mut Vec<u8>,
+    ) -> Poll<io::Result<()>> {
         // Copied from futures::ReadToEnd
-        match futures_core::ready!(poll_read_all_internal(self, cx, &mut buf)) {
-            Ok(_) => Poll::Ready(Ok(buf)),
-            Err(err) => Poll::Ready(Err(err)),
+        match poll_read_all_internal(self, cx, out) {
+            Poll::Ready(t) => Poll::Ready(t.map(|_| ())),
+            Poll::Pending => Poll::Pending,
         }
     }
 

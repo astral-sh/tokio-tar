@@ -908,12 +908,13 @@ async fn pax_simple() {
 async fn pax_pending_interrupted() {
     use std::pin::Pin;
 
-    struct SirPendalot<R> {
+    /// A [`AsyncRead`] that returns `Pending` on every other poll.
+    struct PendingReader<R> {
         inner: R,
         n: usize,
     }
 
-    impl<R> SirPendalot<R>
+    impl<R> PendingReader<R>
     where
         R: AsyncRead + Unpin,
     {
@@ -929,15 +930,15 @@ async fn pax_pending_interrupted() {
             (Pin::new(inner), n)
         }
     }
-    impl<R> AsyncRead for SirPendalot<R>
+    impl<R> AsyncRead for PendingReader<R>
     where
         R: AsyncRead + Unpin,
     {
         fn poll_read(
-            self: std::pin::Pin<&mut Self>,
+            self: Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
+            buf: &mut io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
             use std::task::Poll;
 
             let (inner, n) = self.project();
@@ -955,7 +956,7 @@ async fn pax_pending_interrupted() {
     }
 
     let ar = tar!("paxlongname.tar");
-    let ar = SirPendalot::new(ar);
+    let ar = PendingReader::new(ar);
     let mut ar = Archive::new(ar);
     let mut entries = t!(ar.entries());
 
