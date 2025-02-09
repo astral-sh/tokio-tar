@@ -908,7 +908,7 @@ async fn pax_simple() {
 async fn pax_pending_interrupted() {
     use std::pin::Pin;
 
-    /// A [`tokio::io::AsyncRead`] that returns `Pending` on every other poll.
+    /// A [`AsyncRead`] that returns `Pending` on every other poll.
     struct PendingReader<R> {
         inner: R,
         n: usize,

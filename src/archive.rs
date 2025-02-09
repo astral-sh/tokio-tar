@@ -3,7 +3,6 @@ use rustc_hash::FxHashSet;
 use std::{
     cmp,
     collections::VecDeque,
-    io::Cursor,
     path::Path,
     pin::Pin,
     sync::Arc,
@@ -291,10 +290,26 @@ impl<R: Read + Unpin> Archive<R> {
 pub struct Entries<R: Read + Unpin> {
     archive: Archive<R>,
     current: (u64, Option<Header>, usize, Option<GnuExtSparseHeader>),
+    /// The [`Entry`] that is currently being processed.
     pending: Option<Entry<Archive<R>>>,
-    gnu_longname: (bool, Option<Cursor<Vec<u8>>>),
-    gnu_longlink: (bool, Option<Cursor<Vec<u8>>>),
-    pax_extensions: (bool, Option<Cursor<Vec<u8>>>),
+    /// GNU long name extension.
+    ///
+    /// The first element is a flag indicating whether the long name entry has been fully read.
+    /// The second element is the buffer containing the long name, or `None` if the long name entry
+    /// has not been encountered yet.
+    gnu_longname: (bool, Option<Vec<u8>>),
+    /// GNU long link extension.
+    ///
+    /// The first element is a flag indicating whether the long link entry has been fully read.
+    /// The second element is the buffer containing the long link, or `None` if the long link entry
+    /// has not been encountered yet.
+    gnu_longlink: (bool, Option<Vec<u8>>),
+    /// PAX extensions.
+    ///
+    /// The first element is a flag indicating whether the extension entry has been fully read.
+    /// The second element is the buffer containing the extension, or `None` if the extension entry
+    /// has not been encountered yet.
+    pax_extensions: (bool, Option<Vec<u8>>),
 }
 
 macro_rules! ready_opt_err {
@@ -346,15 +361,14 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                          the same member",
                     ))));
                 }
-                let cursor = self
-                    .gnu_longname
-                    .1
-                    .get_or_insert_with(|| Cursor::new(Vec::new()));
 
                 let mut ef = EntryFields::from(entry);
+                let cursor = self.gnu_longname.1.get_or_insert_with(|| {
+                    let cap = cmp::min(ef.size, 128 * 1024);
+                    Vec::with_capacity(cap as usize)
+                });
                 if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
                     if let Err(err) = result {
-                        self.pending = None;
                         return Poll::Ready(Some(Err(err)));
                     }
                 } else {
@@ -373,15 +387,14 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                          the same member",
                     ))));
                 }
-                let cursor = self
-                    .gnu_longlink
-                    .1
-                    .get_or_insert_with(|| Cursor::new(Vec::new()));
 
                 let mut ef = EntryFields::from(entry);
+                let cursor = self.gnu_longlink.1.get_or_insert_with(|| {
+                    let cap = cmp::min(ef.size, 128 * 1024);
+                    Vec::with_capacity(cap as usize)
+                });
                 if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
                     if let Err(err) = result {
-                        self.pending = None;
                         return Poll::Ready(Some(Err(err)));
                     }
                 } else {
@@ -400,15 +413,14 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                          the same member",
                     ))));
                 }
-                let cursor = self
-                    .pax_extensions
-                    .1
-                    .get_or_insert_with(|| Cursor::new(Vec::new()));
 
                 let mut ef = EntryFields::from(entry);
+                let cursor = self.pax_extensions.1.get_or_insert_with(|| {
+                    let cap = cmp::min(ef.size, 128 * 1024);
+                    Vec::with_capacity(cap as usize)
+                });
                 if let Poll::Ready(result) = Pin::new(&mut ef).poll_read_all(cx, cursor) {
                     if let Err(err) = result {
-                        self.pending = None;
                         return Poll::Ready(Some(Err(err)));
                     }
                 } else {
@@ -420,23 +432,17 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 continue;
             }
 
-            self.pending = None;
-
             let mut fields = EntryFields::from(entry);
             if self.gnu_longname.0 {
-                fields.long_pathname = self.gnu_longname.1.take().map(|cursor| cursor.into_inner());
+                fields.long_pathname = self.gnu_longname.1.take();
                 self.gnu_longname.0 = false;
             }
             if self.gnu_longlink.0 {
-                fields.long_linkname = self.gnu_longlink.1.take().map(|cursor| cursor.into_inner());
+                fields.long_linkname = self.gnu_longlink.1.take();
                 self.gnu_longlink.0 = false;
             }
             if self.pax_extensions.0 {
-                fields.pax_extensions = self
-                    .pax_extensions
-                    .1
-                    .take()
-                    .map(|cursor| cursor.into_inner());
+                fields.pax_extensions = self.pax_extensions.1.take();
                 self.pax_extensions.0 = false;
             }
 
