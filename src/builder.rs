@@ -395,9 +395,11 @@ impl<W: Write + Unpin + Send> Builder<W> {
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
+    /// let td = tempfile::tempdir()?;
+    ///
     /// // Use the directory at one location, but insert it into the archive
     /// // with a different name.
-    /// ar.append_dir_all("bardir", ".").await?;
+    /// ar.append_dir_all("bardir", td.path()).await?;
     /// #
     /// # Ok(()) }) }
     /// ```
