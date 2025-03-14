@@ -30,6 +30,7 @@ portable-atomic = "1"
 rustc-hash = "2.1.0"
 tokio = { version = "1", features = ["fs", "io-util", "rt"] }
 tokio-stream = "0.1"
+zerocopy = { version = "0.8.23", features = ["derive"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -40,7 +41,9 @@ xattr = { version = "1.0", optional = true }
 libc = "0.2"
 
 [features]
-default = ["xattr"]
+default = ["xattr", "zerocopy"]
+# Use safe transmute for headers (otherwise, unsafe pointer casts are used)
+zerocopy = ["dep:zerocopy"]
 
 [lib]
 name = "tokio_tar"
