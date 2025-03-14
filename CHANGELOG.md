@@ -2,7 +2,8 @@
 
 ## 0.5.2
 
-* Update to Rust edition 2024
+* Enable opt-in to deny creation of symlinks outside target directory by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/46
+* Update to Rust edition 2024 by @konstin in https://github.com/astral-sh/tokio-tar/pull/47
 
 ## 0.5.1
 

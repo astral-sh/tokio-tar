@@ -45,6 +45,7 @@ pub struct ArchiveInner<R> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    allow_external_symlinks: bool,
     overwrite: bool,
     ignore_zeros: bool,
     obj: Mutex<R>,
@@ -56,6 +57,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
+    allow_external_symlinks: bool,
     overwrite: bool,
     ignore_zeros: bool,
 }
@@ -67,6 +69,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             unpack_xattrs: false,
             preserve_permissions: false,
             preserve_mtime: true,
+            allow_external_symlinks: true,
             overwrite: true,
             ignore_zeros: false,
             obj,
@@ -119,12 +122,23 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Indicate whether to deny symlinks that point outside the destination
+    /// directory when unpacking this entry. (Writing to locations outside the
+    /// destination directory is _always_ forbidden.)
+    ///
+    /// This flag is enabled by default.
+    pub fn set_allow_external_symlinks(mut self, allow_external_symlinks: bool) -> Self {
+        self.allow_external_symlinks = allow_external_symlinks;
+        self
+    }
+
     /// Construct the archive, ready to accept inputs.
     pub fn build(self) -> Archive<R> {
         let Self {
             unpack_xattrs,
             preserve_permissions,
             preserve_mtime,
+            allow_external_symlinks,
             overwrite,
             ignore_zeros,
             obj,
@@ -135,6 +149,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 unpack_xattrs,
                 preserve_permissions,
                 preserve_mtime,
+                allow_external_symlinks,
                 overwrite,
                 ignore_zeros,
                 obj: Mutex::new(obj),
@@ -152,6 +167,7 @@ impl<R: Read + Unpin> Archive<R> {
                 unpack_xattrs: false,
                 preserve_permissions: false,
                 preserve_mtime: true,
+                allow_external_symlinks: true,
                 overwrite: true,
                 ignore_zeros: false,
                 obj: Mutex::new(obj),
@@ -566,6 +582,7 @@ fn poll_next_raw<R: Read + Unpin>(
         preserve_permissions: archive.inner.preserve_permissions,
         preserve_mtime: archive.inner.preserve_mtime,
         overwrite: archive.inner.overwrite,
+        allow_external_symlinks: archive.inner.allow_external_symlinks,
         read_state: None,
     };
 
