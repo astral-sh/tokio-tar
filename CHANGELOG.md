@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+* Update to Rust edition 2024
+
 ## 0.5.1
 
 * Add test to reproduce issue in `impl Stream for Entries` causing filename truncation by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/41

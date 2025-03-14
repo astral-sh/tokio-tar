@@ -13,7 +13,7 @@ documentation = "https://docs.rs/tokio-tar"
 license = "MIT OR Apache-2.0"
 keywords = ["tar", "tarfile", "encoding"]
 readme = "README.md"
-edition = "2021"
+edition = "2024"
 
 description = """
 A Rust implementation of an async TAR file reader and writer. This library does not
