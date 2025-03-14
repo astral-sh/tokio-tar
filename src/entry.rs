@@ -1,5 +1,5 @@
 use crate::{
-    error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
+    Archive, Header, PaxExtensions, error::TarError, header::bytes2path, other, pax::pax_extensions,
 };
 use filetime::{self, FileTime};
 use rustc_hash::FxHashSet;
@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{
     fs,
-    fs::{remove_file, OpenOptions},
+    fs::{OpenOptions, remove_file},
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
@@ -926,7 +926,7 @@ impl<R: Read + Unpin> Read for EntryFields<R> {
                 this.read_state = this.data.pop_front();
             }
 
-            if let Some(ref mut io) = &mut this.read_state {
+            if let Some(io) = &mut this.read_state {
                 let start = into.filled().len();
                 let ret = Pin::new(io).poll_read(cx, into);
                 match ret {
@@ -962,8 +962,8 @@ impl<R: Read + Unpin> Read for EntryIo<R> {
         into: &mut io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            EntryIo::Pad(ref mut io) => Pin::new(io).poll_read(cx, into),
-            EntryIo::Data(ref mut io) => Pin::new(io).poll_read(cx, into),
+            EntryIo::Pad(io) => Pin::new(io).poll_read(cx, into),
+            EntryIo::Data(io) => Pin::new(io).poll_read(cx, into),
         }
     }
 }
