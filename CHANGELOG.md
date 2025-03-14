@@ -3,6 +3,7 @@
 ## 0.5.2
 
 * Update to Rust edition 2024
+* Use safe transmutes from the zerocopy crate by default
 
 ## 0.5.1
 
