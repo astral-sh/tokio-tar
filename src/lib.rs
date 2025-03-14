@@ -37,6 +37,7 @@ mod builder;
 mod entry;
 mod entry_type;
 mod error;
+mod fs;
 mod header;
 mod pax;
 
