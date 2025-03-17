@@ -28,3 +28,18 @@ jobs:
       - run: cargo check --all --all-targets --all-features
       - run: cargo test
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  msrv:
+    name: "Test (msrv)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: SebRollen/toml-action@v1.2.0
+        id: msrv
+        with:
+          file: "Cargo.toml"
+          field: "package.rust-version"
+      - name: "Install Rust toolchain"
+        run: rustup default ${{ steps.msrv.outputs.value }}
+      - run: cargo +${{ steps.msrv.outputs.value }} test
