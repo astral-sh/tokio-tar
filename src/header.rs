@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::io;
 
-use crate::{EntryType, other};
+use crate::{other, EntryType};
 
 /// A deterministic, arbitrary, non-zero timestamp that use used as `mtime`
 /// of headers when [`HeaderMode::Deterministic`] is used.
@@ -913,13 +913,13 @@ impl<T: fmt::Octal> fmt::Debug for DebugAsOctal<T> {
 unsafe fn cast<T, U>(a: &T) -> &U {
     assert_eq!(mem::size_of_val(a), mem::size_of::<U>());
     assert_eq!(mem::align_of_val(a), mem::align_of::<U>());
-    unsafe { &*(a as *const T as *const U) }
+    &*(a as *const T as *const U)
 }
 
 unsafe fn cast_mut<T, U>(a: &mut T) -> &mut U {
     assert_eq!(mem::size_of_val(a), mem::size_of::<U>());
     assert_eq!(mem::align_of_val(a), mem::align_of::<U>());
-    unsafe { &mut *(a as *mut T as *mut U) }
+    &mut *(a as *mut T as *mut U)
 }
 
 impl Clone for Header {

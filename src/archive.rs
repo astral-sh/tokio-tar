@@ -17,10 +17,9 @@ use tokio_stream::*;
 
 use crate::header::BLOCK_SIZE;
 use crate::{
-    Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
     entry::{EntryFields, EntryIo},
     error::TarError,
-    other,
+    other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
 };
 
 /// A top-level representation of an archive file.
