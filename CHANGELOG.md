@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+* Use safe transmutes from the zerocopy crate by default
+
 ## 0.5.1
 
 * Add test to reproduce issue in `impl Stream for Entries` causing filename truncation by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/41

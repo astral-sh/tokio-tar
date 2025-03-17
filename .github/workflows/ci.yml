@@ -27,6 +27,8 @@ jobs:
       - run: cargo hack check --all --ignore-private --each-feature --no-dev-deps
       - run: cargo check --all --all-targets --all-features
       - run: cargo test
+      # Test without zerocopy
+      - run: cargo test --no-default-features
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   msrv:
