@@ -1,7 +1,6 @@
 use crate::{
-    EntryType, Header,
-    header::{HeaderMode, path2bytes},
-    other,
+    header::{path2bytes, HeaderMode},
+    other, EntryType, Header,
 };
 use std::{fs::Metadata, path::Path, str};
 use tokio::{
