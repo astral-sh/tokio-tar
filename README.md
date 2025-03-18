@@ -19,6 +19,9 @@ the following modifications:
   In [`alexcrichton/tar-rs`](https://github.com/alexcrichton/tar-rs), setting `preserve_permissions`
   to `false` will still set read, write, and execute permissions on extracted files, but will avoid
   setting extended permissions (e.g., `setuid`, `setgid`, and `sticky` bits).
+- Setting `allow_external_symlinks` to `false` will avoid extracting symlinks that point outside the
+  unpack target. Operations that _write_ outside the unpack directory are _always_ denied; but by
+  default, symlinks that _read_ outside the unpack directory are allowed.
 
 See the [changelog](CHANGELOG.md) for a more detailed list of changes.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+* Enable opt-in to deny creation of symlinks outside target directory by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/46
+
 ## 0.5.1
 
 * Add test to reproduce issue in `impl Stream for Entries` causing filename truncation by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/41

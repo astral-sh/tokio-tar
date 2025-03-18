@@ -1,3 +1,4 @@
+use crate::fs::{normalize_absolute, normalize_relative};
 use crate::{
     error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
 };
@@ -54,6 +55,7 @@ pub struct EntryFields<R: Read + Unpin> {
     pub preserve_permissions: bool,
     pub preserve_mtime: bool,
     pub overwrite: bool,
+    pub allow_external_symlinks: bool,
     pub(crate) read_state: Option<EntryIo<R>>,
 }
 
@@ -71,6 +73,8 @@ impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
             .field("unpack_xattrs", &self.unpack_xattrs)
             .field("preserve_permissions", &self.preserve_permissions)
             .field("preserve_mtime", &self.preserve_mtime)
+            .field("overwrite", &self.overwrite)
+            .field("allow_external_symlinks", &self.allow_external_symlinks)
             .field("read_state", &self.read_state)
             .finish()
     }
@@ -320,6 +324,15 @@ impl<R: Read + Unpin> Entry<R> {
     /// This flag is enabled by default.
     pub fn set_preserve_mtime(&mut self, preserve: bool) {
         self.fields.preserve_mtime = preserve;
+    }
+
+    /// Indicate whether to deny symlinks that point outside the destination
+    /// directory when unpacking this entry. (Writing to locations outside the
+    /// destination directory is _always_ forbidden.)
+    ///
+    /// This flag is enabled by default.
+    pub fn set_allow_external_symlinks(&mut self, allow_external_symlinks: bool) {
+        self.fields.allow_external_symlinks = allow_external_symlinks;
     }
 }
 
@@ -571,17 +584,14 @@ impl<R: Read + Unpin> EntryFields<R> {
             let src = match self.link_name()? {
                 Some(name) => name,
                 None => {
-                    return Err(other(&format!(
-                        "hard link listed for {} but no link name found",
-                        String::from_utf8_lossy(self.header.as_bytes())
-                    )));
+                    return Err(other("hard link listed but no link name found"));
                 }
             };
 
             if src.iter().count() == 0 {
                 return Err(other(&format!(
                     "symlink destination for {} is empty",
-                    String::from_utf8_lossy(self.header.as_bytes())
+                    src.display()
                 )));
             }
 
@@ -617,6 +627,26 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
+                if !self.allow_external_symlinks {
+                    if let Some(target_base) = target_base {
+                        // Determine the normalized, absolute destination of the symlink.
+                        let link_dst = if src.is_absolute() {
+                            normalize_absolute(src.as_ref())
+                        } else {
+                            dst.parent()
+                                .and_then(|parent| normalize_relative(parent, src.as_ref()))
+                        };
+
+                        // Verify that the symlink destination is inside the target directory.
+                        if !link_dst.is_some_and(|link_dst| link_dst.starts_with(target_base)) {
+                            return Err(other(&format!(
+                                "symlink destination for {} is outside of the target directory",
+                                src.display()
+                            )));
+                        }
+                    }
+                }
+
                 match symlink(&src, dst).await {
                     Ok(()) => Ok(()),
                     Err(err) => {
