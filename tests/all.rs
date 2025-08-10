@@ -1182,8 +1182,8 @@ async fn path_separators() {
     let path = td.path().join("test");
     t!(t!(File::create(&path).await).write_all(b"test").await);
 
-    let short_path: PathBuf = std::iter::repeat("abcd").take(2).collect();
-    let long_path: PathBuf = std::iter::repeat("abcd").take(50).collect();
+    let short_path: PathBuf = std::iter::repeat_n("abcd", 2).collect();
+    let long_path: PathBuf = std::iter::repeat_n("abcd", 50).collect();
 
     // Make sure UStar headers normalize to Unix path separators
     let mut header = Header::new_ustar();
