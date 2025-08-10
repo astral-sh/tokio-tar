@@ -26,6 +26,7 @@ pub use crate::{
     builder::Builder,
     entry::{Entry, Unpacked},
     entry_type::EntryType,
+    error::TarError,
     header::{
         GnuExtSparseHeader, GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader,
     },

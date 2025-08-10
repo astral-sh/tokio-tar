@@ -1,8 +1,12 @@
 use std::borrow::Cow;
 use std::error;
 use std::fmt;
-use std::io::{self, Error};
+use std::io;
 
+/// Error that occurred while reading or writing tar file.
+///
+/// The source may be an IO error from the operating system or a custom error with additional
+/// context.
 #[derive(Debug)]
 pub struct TarError {
     desc: Cow<'static, str>,
@@ -10,7 +14,7 @@ pub struct TarError {
 }
 
 impl TarError {
-    pub fn new(desc: impl Into<Cow<'static, str>>, err: Error) -> TarError {
+    pub(crate) fn new(desc: impl Into<Cow<'static, str>>, err: io::Error) -> TarError {
         TarError {
             desc: desc.into(),
             io: err,
@@ -34,8 +38,8 @@ impl fmt::Display for TarError {
     }
 }
 
-impl From<TarError> for Error {
-    fn from(t: TarError) -> Error {
-        Error::new(t.io.kind(), t)
+impl From<TarError> for io::Error {
+    fn from(t: TarError) -> io::Error {
+        io::Error::new(t.io.kind(), t)
     }
 }
