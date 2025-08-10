@@ -348,7 +348,7 @@ impl Header {
     ///
     /// Note that this function will convert any `\` characters to directory
     /// separators.
-    pub fn path(&self) -> io::Result<Cow<Path>> {
+    pub fn path(&self) -> io::Result<Cow<'_, Path>> {
         bytes2path(self.path_bytes())
     }
 
@@ -359,7 +359,7 @@ impl Header {
     ///
     /// Note that this function will convert any `\` characters to directory
     /// separators.
-    pub fn path_bytes(&self) -> Cow<[u8]> {
+    pub fn path_bytes(&self) -> Cow<'_, [u8]> {
         if let Some(ustar) = self.as_ustar() {
             ustar.path_bytes()
         } else {
@@ -427,7 +427,7 @@ impl Header {
     ///
     /// Note that this function will convert any `\` characters to directory
     /// separators.
-    pub fn link_name(&self) -> io::Result<Option<Cow<Path>>> {
+    pub fn link_name(&self) -> io::Result<Option<Cow<'_, Path>>> {
         match self.link_name_bytes() {
             Some(bytes) => bytes2path(bytes).map(Some),
             None => Ok(None),
@@ -441,7 +441,7 @@ impl Header {
     ///
     /// Note that this function will convert any `\` characters to directory
     /// separators.
-    pub fn link_name_bytes(&self) -> Option<Cow<[u8]>> {
+    pub fn link_name_bytes(&self) -> Option<Cow<'_, [u8]>> {
         let old = self.as_old();
         if old.linkname[0] != 0 {
             Some(Cow::Borrowed(truncate(&old.linkname)))
@@ -729,7 +729,7 @@ impl Header {
         let len = old.cksum.len();
         self.bytes[0..offset]
             .iter()
-            .chain(iter::repeat(&b' ').take(len))
+            .chain(iter::repeat_n(&b' ', len))
             .chain(&self.bytes[offset + len..])
             .fold(0, |a, b| a + (*b as u32))
     }
@@ -962,7 +962,7 @@ impl fmt::Debug for OldHeader {
 
 impl UstarHeader {
     /// See `Header::path_bytes`
-    pub fn path_bytes(&self) -> Cow<[u8]> {
+    pub fn path_bytes(&self) -> Cow<'_, [u8]> {
         if self.prefix[0] == 0 && !self.name.contains(&b'\\') {
             Cow::Borrowed(truncate(&self.name))
         } else {
@@ -1458,8 +1458,7 @@ fn num_field_wrapper_from(src: &[u8]) -> io::Result<u64> {
 fn numeric_extended_into(dst: &mut [u8], src: u64) {
     let len: usize = dst.len();
     for (slot, val) in dst.iter_mut().zip(
-        repeat(0)
-            .take(len - 8) // to zero init extra bytes
+        iter::repeat_n(0, len - 8) // to zero init extra bytes
             .chain((0..8).rev().map(|x| ((src >> (8 * x)) & 0xff) as u8)),
     ) {
         *slot = val;
@@ -1496,7 +1495,7 @@ fn truncate(slice: &[u8]) -> &[u8] {
 fn copy_into(slot: &mut [u8], bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > slot.len() {
         Err(other("provided value is too long"))
-    } else if bytes.iter().any(|b| *b == 0) {
+    } else if bytes.contains(&0) {
         Err(other("provided value contains a nul byte"))
     } else {
         for (slot, val) in slot.iter_mut().zip(bytes.iter().chain(Some(&0))) {
@@ -1630,7 +1629,7 @@ pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
 
 #[cfg(unix)]
 /// On unix this will never fail
-pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
+pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
     Ok(Cow::Borrowed(p.as_os_str().as_bytes()))
 }
 

@@ -19,7 +19,7 @@
 
 #![deny(missing_docs)]
 
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 
 pub use crate::{
     archive::{Archive, ArchiveBuilder, Entries},
@@ -42,5 +42,5 @@ mod header;
 mod pax;
 
 fn other(msg: &str) -> Error {
-    Error::new(ErrorKind::Other, msg)
+    Error::other(msg)
 }
