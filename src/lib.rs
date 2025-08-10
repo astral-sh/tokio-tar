@@ -19,14 +19,12 @@
 
 #![deny(missing_docs)]
 
-use std::io::Error;
-
 pub use crate::{
     archive::{Archive, ArchiveBuilder, Entries},
     builder::Builder,
     entry::{Entry, Unpacked},
     entry_type::EntryType,
-    error::TarError,
+    error::{InvalidArchive, TarError},
     header::{
         GnuExtSparseHeader, GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader,
     },
@@ -41,7 +39,3 @@ mod error;
 mod fs;
 mod header;
 mod pax;
-
-fn other(msg: &str) -> Error {
-    Error::other(msg)
-}

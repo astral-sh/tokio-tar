@@ -18,8 +18,8 @@ use tokio_stream::*;
 use crate::header::BLOCK_SIZE;
 use crate::{
     entry::{EntryFields, EntryIo},
-    error::TarError,
-    other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
+    error::{InvalidArchive, TarError},
+    Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
 };
 
 /// A top-level representation of an archive file.
@@ -193,10 +193,9 @@ impl<R: Read + Unpin> Archive<R> {
     /// corrupted.
     pub fn entries(&mut self) -> io::Result<Entries<R>> {
         if self.inner.pos.load(Ordering::SeqCst) != 0 {
-            return Err(other(
-                "cannot call entries unless archive is at \
-                 position 0",
-            ));
+            return Err(TarError::InvalidArchive(InvalidArchive::ArchiveNotAtStart {
+                method: "entries".to_string(),
+            }).into());
         }
 
         Ok(Entries {
@@ -217,10 +216,9 @@ impl<R: Read + Unpin> Archive<R> {
     /// corrupted.
     pub fn entries_raw(&mut self) -> io::Result<RawEntries<R>> {
         if self.inner.pos.load(Ordering::SeqCst) != 0 {
-            return Err(other(
-                "cannot call entries_raw unless archive is at \
-                 position 0",
-            ));
+            return Err(TarError::InvalidArchive(InvalidArchive::ArchiveNotAtStart {
+                method: "entries_raw".to_string(),
+            }).into());
         }
 
         Ok(RawEntries {
@@ -260,7 +258,10 @@ impl<R: Read + Unpin> Archive<R> {
         if fs::symlink_metadata(dst).await.is_err() {
             fs::create_dir_all(&dst)
                 .await
-                .map_err(|e| TarError::new(format!("failed to create `{}`", dst.display()), e))?;
+                .map_err(|e| TarError::CreateFailed {
+                    path: dst.to_path_buf(),
+                    source: e,
+                })?;
         }
 
         // Canonicalizing the dst directory will prepend the path with '\\?\'
@@ -278,7 +279,7 @@ impl<R: Read + Unpin> Archive<R> {
         // extraction.
         let mut directories = Vec::new();
         while let Some(entry) = pinned.next().await {
-            let mut file = entry.map_err(|e| TarError::new("failed to iterate over archive", e))?;
+            let mut file = entry.map_err(TarError::IterationFailed)?;
             if file.header().entry_type() == crate::EntryType::Directory {
                 directories.push(file);
             } else {
@@ -372,10 +373,9 @@ impl<R: Read + Unpin> Stream for Entries<R> {
 
             if is_recognized_header && entry.header().entry_type().is_gnu_longname() {
                 if self.gnu_longname.0 {
-                    return Poll::Ready(Some(Err(other(
-                        "two long name entries describing \
-                         the same member",
-                    ))));
+                    return Poll::Ready(Some(Err(TarError::InvalidArchive(InvalidArchive::DuplicateEntries {
+                        entry_type: "long name".to_string(),
+                    }).into())));
                 }
 
                 let mut ef = EntryFields::from(entry);
@@ -398,10 +398,9 @@ impl<R: Read + Unpin> Stream for Entries<R> {
 
             if is_recognized_header && entry.header().entry_type().is_gnu_longlink() {
                 if self.gnu_longlink.0 {
-                    return Poll::Ready(Some(Err(other(
-                        "two long name entries describing \
-                         the same member",
-                    ))));
+                    return Poll::Ready(Some(Err(TarError::InvalidArchive(InvalidArchive::DuplicateEntries {
+                        entry_type: "long link".to_string(),
+                    }).into())));
                 }
 
                 let mut ef = EntryFields::from(entry);
@@ -424,10 +423,9 @@ impl<R: Read + Unpin> Stream for Entries<R> {
 
             if is_recognized_header && entry.header().entry_type().is_pax_local_extensions() {
                 if self.pax_extensions.0 {
-                    return Poll::Ready(Some(Err(other(
-                        "two pax extensions entries describing \
-                         the same member",
-                    ))));
+                    return Poll::Ready(Some(Err(TarError::InvalidArchive(InvalidArchive::DuplicateEntries {
+                        entry_type: "pax extensions".to_string(),
+                    }).into())));
                 }
 
                 let mut ef = EntryFields::from(entry);
@@ -557,7 +555,7 @@ fn poll_next_raw<R: Read + Unpin>(
         + 8 * 32;
     let cksum = header.cksum()?;
     if sum != cksum {
-        return Poll::Ready(Some(Err(other("archive header checksum mismatch"))));
+        return Poll::Ready(Some(Err(TarError::InvalidArchive(InvalidArchive::InvalidChecksum).into())));
     }
 
     let file_pos = *next;
@@ -589,10 +587,10 @@ fn poll_next_raw<R: Read + Unpin>(
     // a header);
     let size = size
         .checked_add(BLOCK_SIZE - 1)
-        .ok_or_else(|| other("size overflow"))?;
+        .ok_or(TarError::InvalidArchive(InvalidArchive::SizeOverflow))?;
     *next = next
         .checked_add(size & !(BLOCK_SIZE - 1))
-        .ok_or_else(|| other("size overflow"))?;
+        .ok_or(TarError::InvalidArchive(InvalidArchive::SizeOverflow))?;
 
     Poll::Ready(Some(Ok(ret.into_entry())))
 }
@@ -611,7 +609,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
 
     let gnu = match entry.header.as_gnu() {
         Some(gnu) => gnu,
-        None => return Poll::Ready(Err(other("sparse entry type listed but not GNU header"))),
+        None => return Poll::Ready(Err(TarError::InvalidArchive(InvalidArchive::SparseNotGnu).into())),
     };
 
     // Sparse files are represented internally as a list of blocks that are
@@ -649,28 +647,17 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
             let len = block.length()?;
 
             if len != 0 && (size - remaining) % BLOCK_SIZE != 0 {
-                return Err(other(
-                    "previous block in sparse file was not \
-                     aligned to 512-byte boundary",
-                ));
+                return Err(TarError::InvalidArchive(InvalidArchive::SparseAlignment).into());
             } else if off < cur {
-                return Err(other(
-                    "out of order or overlapping sparse \
-                     blocks",
-                ));
+                return Err(TarError::InvalidArchive(InvalidArchive::SparseOrdering).into());
             } else if cur < off {
                 let block = io::repeat(0).take(off - cur);
                 data.push_back(EntryIo::Pad(block));
             }
             cur = off
                 .checked_add(len)
-                .ok_or_else(|| other("more bytes listed in sparse file than u64 can hold"))?;
-            remaining = remaining.checked_sub(len).ok_or_else(|| {
-                other(
-                    "sparse file consumed more data than the header \
-                     listed",
-                )
-            })?;
+                .ok_or(TarError::InvalidArchive(InvalidArchive::SparseOverflow))?;
+            remaining = remaining.checked_sub(len).ok_or(TarError::InvalidArchive(InvalidArchive::SparseDataMismatch))?;
             data.push_back(EntryIo::Data(reader.clone().take(len)));
             Ok(())
         };
@@ -695,7 +682,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                     current_ext_pos,
                 )) {
                     Ok(true) => {}
-                    Ok(false) => return Poll::Ready(Err(other("failed to read extension"))),
+                    Ok(false) => return Poll::Ready(Err(TarError::ExtensionReadFailed.into())),
                     Err(err) => return Poll::Ready(Err(err)),
                 }
 
@@ -707,17 +694,11 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
         }
     }
     if cur != gnu.real_size()? {
-        return Poll::Ready(Err(other(
-            "mismatch in sparse file chunks and \
-             size in header",
-        )));
+        return Poll::Ready(Err(TarError::InvalidArchive(InvalidArchive::SparseSizeMismatch).into()));
     }
     entry.size = cur;
     if remaining > 0 {
-        return Poll::Ready(Err(other(
-            "mismatch in sparse file chunks and \
-             entry size in header",
-        )));
+        return Poll::Ready(Err(TarError::InvalidArchive(InvalidArchive::SparseEntrySizeMismatch).into()));
     }
 
     Poll::Ready(Ok(()))
@@ -766,7 +747,7 @@ fn poll_try_read_all<R: Read + Unpin>(
                     return Poll::Ready(Ok(false));
                 }
 
-                return Poll::Ready(Err(other("failed to read entire block")));
+                return Poll::Ready(Err(TarError::IncompleteBlockRead.into()));
             }
             Ok(()) => *pos += read_buf.filled().len(),
             Err(err) => return Poll::Ready(Err(err)),
@@ -789,7 +770,7 @@ fn poll_skip<R: Read + Unpin>(
         let mut read_buf = io::ReadBuf::new(&mut buf[..n as usize]);
         match futures_core::ready!(Pin::new(&mut source).poll_read(cx, &mut read_buf)) {
             Ok(()) if read_buf.filled().is_empty() => {
-                return Poll::Ready(Err(other("unexpected EOF during skip")));
+                return Poll::Ready(Err(TarError::UnexpectedEofDuringSkip.into()));
             }
             Ok(()) => {
                 amt -= read_buf.filled().len() as u64;

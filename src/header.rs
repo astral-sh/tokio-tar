@@ -15,7 +15,10 @@ use std::{
 };
 use tokio::io;
 
-use crate::{other, EntryType};
+use crate::{
+    error::{InvalidArchive, TarError},
+    EntryType,
+};
 
 /// A deterministic, arbitrary, non-zero timestamp that use used as `mtime`
 /// of headers when [`HeaderMode::Deterministic`] is used.
@@ -314,22 +317,17 @@ impl Header {
     /// describes.
     ///
     /// May return an error if the field is corrupted.
-    pub fn entry_size(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.as_old().size).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting size for {}", err, self.path_lossy()),
-            )
-        })
+    pub fn entry_size(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.as_old().size)
     }
 
     /// Returns the file size this header represents.
     ///
     /// May return an error if the field is corrupted.
-    pub fn size(&self) -> io::Result<u64> {
+    pub fn size(&self) -> Result<u64, TarError> {
         if self.entry_type().is_gnu_sparse() {
             self.as_gnu()
-                .ok_or_else(|| other("sparse header was not a gnu header"))
+                .ok_or(TarError::InvalidArchive(InvalidArchive::SparseNotGnu))
                 .and_then(|h| h.real_size())
         } else {
             self.entry_size()
@@ -491,13 +489,8 @@ impl Header {
     /// Returns the value of the owner's user ID field
     ///
     /// May return an error if the field is corrupted.
-    pub fn uid(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.as_old().uid).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting uid for {}", err, self.path_lossy()),
-            )
-        })
+    pub fn uid(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.as_old().uid)
     }
 
     /// Encodes the `uid` provided into this header.
@@ -506,13 +499,8 @@ impl Header {
     }
 
     /// Returns the value of the group's user ID field
-    pub fn gid(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.as_old().gid).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting gid for {}", err, self.path_lossy()),
-            )
-        })
+    pub fn gid(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.as_old().gid)
     }
 
     /// Encodes the `gid` provided into this header.
@@ -521,13 +509,8 @@ impl Header {
     }
 
     /// Returns the last modification time in Unix time format
-    pub fn mtime(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.as_old().mtime).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting mtime for {}", err, self.path_lossy()),
-            )
-        })
+    pub fn mtime(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.as_old().mtime)
     }
 
     /// Encodes the `mtime` provided into this header.
@@ -577,7 +560,11 @@ impl Header {
         if let Some(gnu) = self.as_gnu_mut() {
             gnu.set_username(name)
         } else {
-            Err(other("not a ustar or gnu archive, cannot set username"))
+            Err(TarError::UnsupportedOperation {
+                archive_type: "ustar or gnu".to_string(),
+                operation: "set username".to_string(),
+            }
+            .into())
         }
     }
 
@@ -620,7 +607,11 @@ impl Header {
         if let Some(gnu) = self.as_gnu_mut() {
             gnu.set_groupname(name)
         } else {
-            Err(other("not a ustar or gnu archive, cannot set groupname"))
+            Err(TarError::UnsupportedOperation {
+                archive_type: "ustar or gnu".to_string(),
+                operation: "set groupname".to_string(),
+            }
+            .into())
         }
     }
 
@@ -653,7 +644,11 @@ impl Header {
             gnu.set_device_major(major);
             Ok(())
         } else {
-            Err(other("not a ustar or gnu archive, cannot set dev_major"))
+            Err(TarError::UnsupportedOperation {
+                archive_type: "ustar or gnu".to_string(),
+                operation: "set dev_major".to_string(),
+            }
+            .into())
         }
     }
 
@@ -686,7 +681,11 @@ impl Header {
             gnu.set_device_minor(minor);
             Ok(())
         } else {
-            Err(other("not a ustar or gnu archive, cannot set dev_minor"))
+            Err(TarError::UnsupportedOperation {
+                archive_type: "ustar or gnu".to_string(),
+                operation: "set dev_minor".to_string(),
+            }
+            .into())
         }
     }
 
@@ -703,15 +702,10 @@ impl Header {
     /// Returns the checksum field of this header.
     ///
     /// May return an error if the field is corrupted.
-    pub fn cksum(&self) -> io::Result<u32> {
+    pub fn cksum(&self) -> Result<u32, TarError> {
         octal_from(&self.as_old().cksum)
             .map(|u| u as u32)
-            .map_err(|err| {
-                io::Error::new(
-                    err.kind(),
-                    format!("{} when getting cksum for {}", err, self.path_lossy()),
-                )
-            })
+            .map_err(TarError::from)
     }
 
     /// Sets the checksum field of this header based on the current fields in
@@ -1012,10 +1006,10 @@ impl UstarHeader {
                 match prefix.parent() {
                     Some(parent) => prefix = parent,
                     None => {
-                        return Err(other(&format!(
-                            "path cannot be split to be inserted into archive: {}",
-                            path.display()
-                        )));
+                        return Err(TarError::InvalidArchive(InvalidArchive::PathNotSplittable {
+                            path: path.to_path_buf(),
+                        })
+                        .into());
                     }
                 }
                 prefixlen = path2bytes(prefix)?.len();
@@ -1222,13 +1216,8 @@ impl GnuHeader {
     }
 
     /// Returns the last modification time in Unix time format
-    pub fn atime(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.atime).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting atime for {}", err, self.fullname_lossy()),
-            )
-        })
+    pub fn atime(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.atime)
     }
 
     /// Encodes the `atime` provided into this header.
@@ -1240,13 +1229,8 @@ impl GnuHeader {
     }
 
     /// Returns the last modification time in Unix time format
-    pub fn ctime(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.ctime).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting ctime for {}", err, self.fullname_lossy()),
-            )
-        })
+    pub fn ctime(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.ctime)
     }
 
     /// Encodes the `ctime` provided into this header.
@@ -1261,17 +1245,8 @@ impl GnuHeader {
     ///
     /// This is applicable for sparse files where the returned size here is the
     /// size of the entire file after the sparse regions have been filled in.
-    pub fn real_size(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.realsize).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!(
-                    "{} when getting real_size for {}",
-                    err,
-                    self.fullname_lossy()
-                ),
-            )
-        })
+    pub fn real_size(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.realsize)
     }
 
     /// Indicates whether this header will be followed by additional
@@ -1333,25 +1308,15 @@ impl GnuSparseHeader {
     /// Offset of the block from the start of the file
     ///
     /// Returns `Err` for a malformed `offset` field.
-    pub fn offset(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.offset).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting offset from sparse header", err),
-            )
-        })
+    pub fn offset(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.offset)
     }
 
     /// Length of the block
     ///
     /// Returns `Err` for a malformed `numbytes` field.
-    pub fn length(&self) -> io::Result<u64> {
-        num_field_wrapper_from(&self.numbytes).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when getting length from sparse header", err),
-            )
-        })
+    pub fn length(&self) -> Result<u64, TarError> {
+        num_field_wrapper_from(&self.numbytes)
     }
 }
 
@@ -1411,15 +1376,20 @@ fn octal_from(slice: &[u8]) -> io::Result<u64> {
     let num = match str::from_utf8(trun) {
         Ok(n) => n,
         Err(_) => {
-            return Err(other(&format!(
-                "numeric field did not have utf-8 text: {}",
-                String::from_utf8_lossy(trun)
-            )));
+            return Err(
+                TarError::InvalidArchive(InvalidArchive::NumericFieldNotUtf8 {
+                    text: String::from_utf8_lossy(trun).to_string(),
+                })
+                .into(),
+            );
         }
     };
     match u64::from_str_radix(num.trim(), 8) {
         Ok(n) => Ok(n),
-        Err(_) => Err(other(&format!("numeric field was not a number: {}", num))),
+        Err(_) => Err(TarError::InvalidNumericField {
+            field: num.to_string(),
+        }
+        .into()),
     }
 }
 
@@ -1443,11 +1413,11 @@ fn num_field_wrapper_into(dst: &mut [u8], src: u64) {
 
 // Wrapper to figure out if we should read the header field in binary (numeric
 // extension) or octal (standard encoding).
-fn num_field_wrapper_from(src: &[u8]) -> io::Result<u64> {
+fn num_field_wrapper_from(src: &[u8]) -> Result<u64, TarError> {
     if src[0] & 0x80 != 0 {
         Ok(numeric_extended_from(src))
     } else {
-        octal_from(src)
+        octal_from(src).map_err(TarError::from)
     }
 }
 
@@ -1494,9 +1464,9 @@ fn truncate(slice: &[u8]) -> &[u8] {
 /// array is too long or if it contains any nul bytes.
 fn copy_into(slot: &mut [u8], bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > slot.len() {
-        Err(other("provided value is too long"))
+        Err(TarError::InvalidArchive(InvalidArchive::ValueTooLong).into())
     } else if bytes.contains(&0) {
-        Err(other("provided value contains a nul byte"))
+        Err(TarError::InvalidArchive(InvalidArchive::ValueContainsNul).into())
     } else {
         for (slot, val) in slot.iter_mut().zip(bytes.iter().chain(Some(&0))) {
             *slot = *val;
@@ -1518,14 +1488,14 @@ fn copy_path_into_inner(
         let bytes = path2bytes(Path::new(component.as_os_str()))?;
         match (component, is_link_name) {
             (Component::Prefix(..), false) | (Component::RootDir, false) => {
-                return Err(other("paths in archives must be relative"));
+                return Err(TarError::InvalidArchive(InvalidArchive::PathNotRelative).into());
             }
             (Component::ParentDir, false) => {
                 // If it's last component of a gnu long path we know that there might be more
                 // to the component than .. (the rest is stored elsewhere)
                 // Otherwise it's a clear error
                 if !is_truncated_gnu_long_path || iter.peek().is_some() {
-                    return Err(other("paths in archives must not have `..`"));
+                    return Err(TarError::InvalidArchive(InvalidArchive::PathHasParentDir).into());
                 }
             }
             // Allow "./" as the path
@@ -1538,7 +1508,7 @@ fn copy_path_into_inner(
         }
         if bytes.contains(&b'/') {
             if let Component::Normal(..) = component {
-                return Err(other("path component in archive cannot contain `/`"));
+                return Err(TarError::InvalidArchive(InvalidArchive::PathComponentHasSlash).into());
             }
         }
         copy(&mut slot, &bytes)?;
@@ -1548,7 +1518,7 @@ fn copy_path_into_inner(
         emitted = true;
     }
     if !emitted {
-        return Err(other("paths in archives must have at least one component"));
+        return Err(TarError::InvalidArchive(InvalidArchive::PathEmpty).into());
     }
     if ends_with_slash(path) {
         copy(&mut slot, b"/")?;
@@ -1610,7 +1580,12 @@ pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
     p.as_os_str()
         .to_str()
         .map(|s| s.as_bytes())
-        .ok_or_else(|| other(&format!("path {} was not valid Unicode", p.display())))
+        .ok_or_else(|| {
+            TarError::InvalidArchive(InvalidArchive::PathNotUnicode {
+                path: p.to_path_buf(),
+            })
+            .into()
+        })
         .map(|bytes| {
             if bytes.contains(&b'\\') {
                 // Normalize to Unix-style path separators
@@ -1649,10 +1624,10 @@ pub fn bytes2path(bytes: Cow<[u8]>) -> io::Result<Cow<Path>> {
     };
 
     fn not_unicode(v: &[u8]) -> io::Error {
-        other(&format!(
-            "only Unicode paths are supported on Windows: {}",
-            String::from_utf8_lossy(v)
-        ))
+        TarError::InvalidArchive(InvalidArchive::WindowsPathNotUnicode {
+            path: String::from_utf8_lossy(v).to_string(),
+        })
+        .into()
     }
 }
 

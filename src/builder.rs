@@ -1,6 +1,7 @@
 use crate::{
+    error::{InvalidArchive, TarError},
     header::{path2bytes, HeaderMode},
-    other, EntryType, Header,
+    EntryType, Header,
 };
 use std::{fs::Metadata, path::Path, str};
 use tokio::{
@@ -512,7 +513,7 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
         }
         #[cfg(not(unix))]
         {
-            Err(other(&format!("{} has unknown file type", path.display())))
+            Err(TarError::UnknownFileType { path: path.to_path_buf() }.into())
         }
     }
 }
@@ -530,10 +531,7 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     let entry_type;
     if file_type.is_socket() {
         // sockets can't be archived
-        return Err(other(&format!(
-            "{}: socket can not be archived",
-            path.display()
-        )));
+        return Err(TarError::InvalidArchive(InvalidArchive::SocketNotArchivable { path: path.to_path_buf() }).into());
     } else if file_type.is_fifo() {
         entry_type = EntryType::Fifo;
     } else if file_type.is_char_device() {
@@ -541,7 +539,7 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     } else if file_type.is_block_device() {
         entry_type = EntryType::Block;
     } else {
-        return Err(other(&format!("{} has unknown file type", path.display())));
+        return Err(TarError::UnknownFileType { path: path.to_path_buf() }.into());
     }
 
     let mut header = Header::new_gnu();

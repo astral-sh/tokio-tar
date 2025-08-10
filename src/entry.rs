@@ -1,6 +1,6 @@
 use crate::fs::{normalize_absolute, normalize_relative};
 use crate::{
-    error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
+    error::{InvalidArchive, TarError}, header::bytes2path, pax::pax_extensions, Archive, Header, PaxExtensions,
 };
 use filetime::{self, FileTime};
 use rustc_hash::FxHashSet;
@@ -483,11 +483,8 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         let mut file_dst = dst.to_path_buf();
         {
-            let path = self.path().map_err(|e| {
-                TarError::new(
-                    format!("invalid path in entry header: {}", self.path_lossy()),
-                    e,
-                )
+            let path = self.path().map_err(|_| {
+                TarError::InvalidPath { path: self.path_lossy().to_string() }
             })?;
             for part in path.components() {
                 match part {
@@ -522,7 +519,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Validate the parent, if we haven't seen it yet.
         if !memo.contains(parent) {
             self.ensure_dir_created(dst, parent).await.map_err(|e| {
-                TarError::new(format!("failed to create `{}`", parent.display()), e)
+                TarError::CreateFailed { path: parent.to_path_buf(), source: e }
             })?;
             self.validate_inside_dst(dst, parent).await?;
             memo.insert(parent.to_path_buf());
@@ -530,7 +527,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         self.unpack(Some(dst), &file_dst)
             .await
-            .map_err(|e| TarError::new(format!("failed to unpack `{}`", file_dst.display()), e))?;
+            .map_err(|e| TarError::UnpackFailed { path: file_dst.clone(), source: e })?;
 
         Ok(Some(file_dst))
     }
@@ -584,15 +581,12 @@ impl<R: Read + Unpin> EntryFields<R> {
             let src = match self.link_name()? {
                 Some(name) => name,
                 None => {
-                    return Err(other("hard link listed but no link name found"));
+                    return Err(TarError::InvalidArchive(InvalidArchive::HardLinkNameMissing).into());
                 }
             };
 
             if src.iter().count() == 0 {
-                return Err(other(&format!(
-                    "symlink destination for {} is empty",
-                    src.display()
-                )));
+                return Err(TarError::InvalidArchive(InvalidArchive::SymlinkDestinationEmpty { path: src.to_path_buf() }).into());
             }
 
             if kind.is_hard_link() {
@@ -639,10 +633,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
                         // Verify that the symlink destination is inside the target directory.
                         if !link_dst.is_some_and(|link_dst| link_dst.starts_with(target_base)) {
-                            return Err(other(&format!(
-                                "symlink destination for {} is outside of the target directory",
-                                src.display()
-                            )));
+                            return Err(TarError::InvalidArchive(InvalidArchive::SymlinkDestinationOutside { path: src.to_path_buf() }).into());
                         }
                     }
                 }
@@ -666,7 +657,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 if self.preserve_mtime {
                     if let Some(mtime) = get_mtime(&self.header) {
                         filetime::set_symlink_file_times(dst, mtime, mtime).map_err(|e| {
-                            TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
+                            TarError::MetadataFailed { path: dst.to_path_buf(), operation: "mtime".to_string(), source: e }
                         })?;
                     }
                 }
@@ -755,7 +746,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     EntryIo::Data(mut d) => {
                         let expected = d.limit();
                         if io::copy(&mut d, &mut writer).await? != expected {
-                            return Err(other("failed to write entire file"));
+                            return Err(TarError::IncompleteFileWrite.into());
                         }
                     }
                     EntryIo::Pad(d) => {
@@ -773,21 +764,13 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
         .await
         .map_err(|e| {
-            let header = self.header.path_bytes();
-            TarError::new(
-                format!(
-                    "failed to unpack `{}` into `{}`",
-                    String::from_utf8_lossy(&header),
-                    dst.display()
-                ),
-                e,
-            )
+            TarError::UnpackFailed { path: dst.to_path_buf(), source: e }
         })?;
 
         if self.preserve_mtime {
             if let Some(mtime) = get_mtime(&self.header) {
                 filetime::set_file_times(dst, mtime, mtime).map_err(|e| {
-                    TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
+                    TarError::MetadataFailed { path: dst.to_path_buf(), operation: "mtime".to_string(), source: e }
                 })?;
             }
         }
@@ -807,15 +790,11 @@ impl<R: Read + Unpin> EntryFields<R> {
             mode: u32,
         ) -> Result<(), TarError> {
             _set_perms(dst, f, mode).await.map_err(|e| {
-                TarError::new(
-                    format!(
-                        "failed to set permissions to {:o} \
-                         for `{}`",
-                        mode,
-                        dst.display()
-                    ),
-                    e,
-                )
+                TarError::MetadataFailed {
+                    path: dst.to_path_buf(),
+                    operation: format!("permissions to {:o}", mode),
+                    source: e,
+                }
             })
         }
 
@@ -877,17 +856,11 @@ impl<R: Read + Unpin> EntryFields<R> {
 
             for (key, value) in exts {
                 xattr::set(dst, key, value).map_err(|e| {
-                    TarError::new(
-                        format!(
-                            "failed to set extended \
-                             attributes to {}. \
-                             Xattrs: key={:?}, value={:?}.",
-                            dst.display(),
-                            key,
-                            String::from_utf8_lossy(value)
-                        ),
-                        e,
-                    )
+                    TarError::MetadataFailed {
+                        path: dst.to_path_buf(),
+                        operation: format!("extended attributes. Xattrs: key={:?}, value={:?}", key, String::from_utf8_lossy(value)),
+                        source: e,
+                    }
                 })?;
             }
 
@@ -930,14 +903,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             )
         })?;
         if !canon_parent.starts_with(dst) {
-            let err = TarError::new(
-                format!(
-                    "trying to unpack outside of destination path: {}",
-                    dst.display()
-                ),
-                // TODO: use ErrorKind::InvalidInput here? (minor breaking change)
-                Error::other("Invalid argument"),
-            );
+            let err = TarError::InvalidArchive(InvalidArchive::PathOutsideDestination { destination: dst.to_path_buf() });
             return Err(err.into());
         }
         Ok(())

@@ -2,7 +2,7 @@ use std::{slice, str};
 
 use tokio::io;
 
-use crate::other;
+use crate::error::{InvalidArchive, TarError};
 
 /// An iterator over the pax extensions in an archive entry.
 ///
@@ -56,7 +56,7 @@ impl<'entry> Iterator for PaxExtensions<'entry> {
                     key: &line[kvstart..kvstart + equals],
                     value: &line[kvstart + equals + 1..],
                 })
-                .ok_or_else(|| other("malformed pax extension")),
+                .ok_or_else(|| TarError::InvalidArchive(InvalidArchive::MalformedPaxExtension).into()),
         )
     }
 }
