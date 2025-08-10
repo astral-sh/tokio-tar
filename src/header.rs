@@ -1337,7 +1337,7 @@ impl GnuSparseHeader {
         num_field_wrapper_from(&self.offset).map_err(|err| {
             io::Error::new(
                 err.kind(),
-                format!("{err} when getting offset from sparse header"),
+                format!("{} when getting offset from sparse header", err),
             )
         })
     }
@@ -1349,7 +1349,7 @@ impl GnuSparseHeader {
         num_field_wrapper_from(&self.numbytes).map_err(|err| {
             io::Error::new(
                 err.kind(),
-                format!("{err} when getting length from sparse header"),
+                format!("{} when getting length from sparse header", err),
             )
         })
     }
@@ -1419,12 +1419,12 @@ fn octal_from(slice: &[u8]) -> io::Result<u64> {
     };
     match u64::from_str_radix(num.trim(), 8) {
         Ok(n) => Ok(n),
-        Err(_) => Err(other(&format!("numeric field was not a number: {num}"))),
+        Err(_) => Err(other(&format!("numeric field was not a number: {}", num))),
     }
 }
 
 fn octal_into<T: fmt::Octal>(dst: &mut [u8], val: T) {
-    let o = format!("{val:o}");
+    let o = format!("{:o}", val);
     let value = once(b'\0').chain(o.bytes().rev().chain(repeat(b'0')));
     for (slot, value) in dst.iter_mut().rev().zip(value) {
         *slot = value;
