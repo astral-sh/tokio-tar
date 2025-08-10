@@ -20,6 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: Swatinem/rust-cache@v2
+      - run: rustup show
       - run: cargo fmt --all -- --check
       - uses: taiki-e/install-action@v2
         with:
