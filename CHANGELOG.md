@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+* Expose `TarError` publicly by @konstin in https://github.com/astral-sh/tokio-tar/pull/52
+
 ## 0.5.2
 
 * Enable opt-in to deny creation of symlinks outside target directory by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/46
