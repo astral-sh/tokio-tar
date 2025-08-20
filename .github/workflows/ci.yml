@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions: {}
+
 jobs:
   ci:
     runs-on: ${{ matrix.os }}
@@ -19,12 +21,14 @@ jobs:
     name: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
       - name: "Install latest stable Rust"
         run: rustup update
       - run: cargo fmt --all -- --check
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@5c27e59d8c472d2a91731d8b5d7fe040fad53387 # v2.58.18
         with:
           tool: cargo-hack
       - run: cargo hack check --all --ignore-private --each-feature --no-dev-deps
@@ -36,13 +40,19 @@ jobs:
     name: msrv
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: SebRollen/toml-action@v1.2.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+      - uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
         id: msrv
         with:
           file: "Cargo.toml"
           field: "package.rust-version"
       - name: "Install Rust toolchain"
-        run: rustup default ${{ steps.msrv.outputs.value }}
-      - run: cargo +${{ steps.msrv.outputs.value }} test
+        run: rustup default ${MSRV}
+        env:
+          MSRV: ${{ steps.msrv.outputs.value }}
+      - run: cargo +${MSRV} test
+        env:
+          MSRV: ${{ steps.msrv.outputs.value }}
