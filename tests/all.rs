@@ -7,7 +7,7 @@ extern crate xattr;
 
 use std::{
     io::Cursor,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use tokio::{
     fs::{self, File},
@@ -1487,5 +1487,131 @@ async fn header_size_overflow() {
         err.to_string().contains("size overflow"),
         "bad error: {}",
         err
+    );
+}
+
+/// Tests handling of paths starting with `./` in a tar archive
+///
+/// This test builds a Debian-like tar archive where:
+///
+/// 1. Every path starts with `./` (ensuring we don't strip away the leading `./`)
+/// 2. An entry is created for each component of the path (e.g., "./", "./usr", "./usr/lib", etc.)
+/// 3. The final file entry contains the expected content
+///
+/// This pattern is required for Debian/Ubuntu packages and other systems that expect
+/// consistent directory structure with explicit relative paths
+#[tokio::test]
+async fn append_paths_starting_with_cur_dir() {
+    async fn add_directory(builder: &mut Builder<Vec<u8>>, path: &Path) {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_gid(0);
+        header.set_uid(0);
+        header.set_cksum();
+
+        builder
+            .append_data(&mut header, path, "".as_bytes())
+            .await
+            .unwrap();
+    }
+
+    // Adds the ancestor components of `path` into the builder
+    async fn populate_ancestors(builder: &mut Builder<Vec<u8>>, path: &Path) {
+        use std::path::Component;
+
+        let count = path.components().count();
+
+        let ancestors = path.components().take(count - 1);
+
+        let mut path_so_far = PathBuf::new();
+
+        for ancestor in ancestors {
+            match ancestor {
+                Component::CurDir => {
+                    path_so_far = path_so_far.join("./");
+                }
+                Component::Normal(os_str) => {
+                    path_so_far = path_so_far.join(os_str);
+                }
+                other => unreachable!("Unexpected component: {:?}", other),
+            }
+
+            add_directory(builder, &path_so_far).await;
+        }
+    }
+
+    let path = Path::new("./usr/lib/postgresql/15/lib/bitcode/vector/src/ivfbuild.bc");
+
+    let tar = {
+        let data = "dummy".as_bytes();
+        let mut builder = Builder::new(Vec::new());
+
+        // Add `./`, `./usr`, `/usr/lib`, etc
+        populate_ancestors(&mut builder, path).await;
+
+        let mut header = Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_entry_type(EntryType::Regular);
+
+        builder.append_data(&mut header, path, data).await.unwrap();
+
+        builder.into_inner().await.unwrap()
+    };
+
+    let mut ar = Archive::new(Cursor::new(tar));
+    let mut entries = ar.entries().unwrap();
+
+    let expected_paths = {
+        let mut expected_paths = Vec::new();
+        let mut current_path = PathBuf::new();
+
+        for component in path.components().take(path.components().count() - 1) {
+            match component {
+                Component::CurDir => {
+                    current_path.push("./");
+                }
+                Component::Normal(os_str) => {
+                    current_path.push(os_str);
+                }
+                other => unreachable!("Unexpected component: {:?}", other),
+            }
+            expected_paths.push(current_path.clone());
+        }
+
+        // Add the final file path
+        expected_paths.push(path.to_path_buf());
+
+        expected_paths
+    };
+
+    // Verify each entry in the tar file
+    for expected_path in expected_paths {
+        let mut entry = entries
+            .next()
+            .await
+            .expect("Missing expected entry")
+            .unwrap();
+        let actual_path = entry.path().unwrap();
+
+        assert_eq!(
+            actual_path, expected_path,
+            "Path mismatch: expected {:?}, got {:?}",
+            expected_path, actual_path
+        );
+
+        // For the final entry (the file itself), verify its contents
+        if entry.header().entry_type() == EntryType::Regular {
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).await.unwrap();
+
+            assert_eq!(content, b"dummy", "File content doesn't match expected");
+        }
+    }
+
+    assert!(
+        entries.next().await.is_none(),
+        "Unexpected extra entry in tar file"
     );
 }

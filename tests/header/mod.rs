@@ -144,11 +144,19 @@ fn set_path() {
         assert_eq!(t!(h.path()).to_str(), Some("foo\\bar"));
     }
 
-    // set_path documentation explictly states it removes any ".", signfying the
-    // current directory, from the path. This test ensures that documented
-    // beavhior occurs
+    // set_path documentation explicitly states it removes any "." from the path,
+    // except when at the beginning. That is:
+    // - "./control" is allowed (leading dot-slash is preserved)
+    // - "foo/./control" is not allowed (middle dot-slash is rejected)
+    // This test ensures that documented behavior occurs
     t!(h.set_path("./control"));
-    assert_eq!(t!(h.path()).to_str(), Some("control"));
+    assert_eq!(t!(h.path()).to_str(), Some("./control"));
+
+    t!(h.set_path("./foo/./control"));
+    assert_eq!(t!(h.path()).to_str(), Some("./foo/control"));
+
+    t!(h.set_path("./bar/./control/./"));
+    assert_eq!(t!(h.path()).to_str(), Some("./bar/control/"));
 
     let long_name = "foo".repeat(100);
     let medium1 = "foo".repeat(52);
