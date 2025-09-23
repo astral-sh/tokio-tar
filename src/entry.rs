@@ -1,4 +1,4 @@
-use crate::fs::{normalize_absolute, normalize_relative};
+use crate::fs::normalize;
 use crate::{
     error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
 };
@@ -519,6 +519,13 @@ impl<R: Read + Unpin> EntryFields<R> {
             None => return Ok(None),
         };
 
+        // If the target is a link, clear the memoized set entirely. If we don't clear the set, then
+        // a malicious tarball could create a symlink to change the effective parent directory
+        // of an unpacked file _after_ it has been validated.
+        if self.header.entry_type().is_symlink() || self.header.entry_type().is_hard_link() {
+            memo.clear();
+        }
+
         // Validate the parent, if we haven't seen it yet.
         if !memo.contains(parent) {
             self.ensure_dir_created(dst, parent).await.map_err(|e| {
@@ -581,17 +588,25 @@ impl<R: Read + Unpin> EntryFields<R> {
             }
             return Ok(Unpacked::Other);
         } else if kind.is_hard_link() || kind.is_symlink() {
-            let src = match self.link_name()? {
+            let link_name = match self.link_name()? {
                 Some(name) => name,
                 None => {
                     return Err(other("hard link listed but no link name found"));
                 }
             };
 
-            if src.iter().count() == 0 {
+            // Reject absolute paths entirely.
+            if !self.allow_external_symlinks && link_name.is_absolute() {
+                return Err(other(&format!(
+                    "symlink path `{}` is absolute, but external symlinks are not allowed",
+                    link_name.display()
+                )));
+            }
+
+            if link_name.iter().count() == 0 {
                 return Err(other(&format!(
                     "symlink destination for {} is empty",
-                    src.display()
+                    link_name.display()
                 )));
             }
 
@@ -609,11 +624,11 @@ impl<R: Read + Unpin> EntryFields<R> {
                     // links though they're canonicalized to their existing path
                     // so we need to validate at this time.
                     Some(p) => {
-                        let link_src = p.join(src);
+                        let link_src = p.join(link_name);
                         self.validate_inside_dst(p, &link_src).await?;
                         link_src
                     }
-                    None => src.into_owned(),
+                    None => link_name.into_owned(),
                 };
                 fs::hard_link(&link_src, dst).await.map_err(|err| {
                     Error::new(
@@ -627,34 +642,56 @@ impl<R: Read + Unpin> EntryFields<R> {
                     )
                 })?;
             } else {
-                if !self.allow_external_symlinks {
-                    if let Some(target_base) = target_base {
-                        // Determine the normalized, absolute destination of the symlink.
-                        let link_dst = if src.is_absolute() {
-                            normalize_absolute(src.as_ref())
-                        } else {
-                            dst.parent()
-                                .and_then(|parent| normalize_relative(parent, src.as_ref()))
-                        };
+                let normalized_src = if self.allow_external_symlinks {
+                    // If external symlinks are allowed, use the source path as is.
+                    link_name
+                } else {
+                    // Ensure that we were able to normalize the path (e.g., `a/b/../c` to `a/c`).
+                    let Some(normalized_src) = normalize(&link_name) else {
+                        return Err(other(&format!(
+                            "symlink destination for {} is not a valid path",
+                            link_name.display()
+                        )));
+                    };
 
-                        // Verify that the symlink destination is inside the target directory.
-                        if !link_dst.is_some_and(|link_dst| link_dst.starts_with(target_base)) {
-                            return Err(other(&format!(
-                                "symlink destination for {} is outside of the target directory",
-                                src.display()
-                            )));
-                        }
+                    // Join the normalized path with the parent of `dst`.
+                    let Some(absolute_normalized_path) = dst
+                        .parent()
+                        .map(|parent| parent.join(&normalized_src))
+                        .and_then(|path| normalize(&path))
+                    else {
+                        return Err(other(&format!(
+                            "symlink destination for {} lacks a parent path",
+                            link_name.display()
+                        )));
+                    };
+
+                    println!(
+                        "Absolute normalized symlink source: {}",
+                        absolute_normalized_path.display()
+                    );
+
+                    // If the normalized path points outside the target directory, reject it.
+                    if !target_base
+                        .is_some_and(|target| absolute_normalized_path.starts_with(target))
+                    {
+                        return Err(other(&format!(
+                            "symlink destination for {} is outside of the target directory",
+                            link_name.display()
+                        )));
                     }
-                }
 
-                match symlink(&src, dst).await {
+                    Cow::Owned(normalized_src)
+                };
+
+                match symlink(&normalized_src, dst).await {
                     Ok(()) => Ok(()),
                     Err(err) => {
                         if err.kind() == io::ErrorKind::AlreadyExists && self.overwrite {
                             match remove_file(dst).await {
-                                Ok(()) => symlink(&src, dst).await,
+                                Ok(()) => symlink(&normalized_src, dst).await,
                                 Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
-                                    symlink(&src, dst).await
+                                    symlink(&normalized_src, dst).await
                                 }
                                 Err(e) => Err(e),
                             }

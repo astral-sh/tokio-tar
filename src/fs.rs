@@ -1,62 +1,52 @@
 use std::path::{Component, Path, PathBuf};
 
-/// Normalize an absolute path.
-pub(crate) fn normalize_absolute(p: &Path) -> Option<PathBuf> {
-    debug_assert!(p.is_absolute(), "Target must be an absolute path");
+/// Normalize a path, like Python's `os.path.normpath`.
+///
+/// Adapted from <https://github.com/rust-lang/cargo/blob/fede83ccf973457de319ba6fa0e36ead454d2e20/src/cargo/util/paths.rs#L61>.
+pub(crate) fn normalize(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components().peekable();
+    let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek() {
+        let buf = PathBuf::from(c.as_os_str());
+        components.next();
+        buf
+    } else {
+        PathBuf::new()
+    };
+    let mut has_root = false;
 
-    let mut resolved = PathBuf::new();
-    for component in p.components() {
+    for component in components {
         match component {
-            Component::Prefix(prefix) => {
-                // Windows-specific: preserve drive letter and prefix.
-                resolved.push(prefix.as_os_str());
-            }
+            Component::Prefix(..) => unreachable!(),
             Component::RootDir => {
-                // Append root directory after prefix.
-                resolved.push(component.as_os_str());
+                ret.push(component.as_os_str());
+                has_root = true;
             }
-            Component::CurDir => {
-                // Ignore `.`
-            }
+            Component::CurDir => {}
             Component::ParentDir => {
-                if !resolved.pop() {
+                // Preserve leading `..` components.
+                if ret
+                    .components()
+                    .next_back()
+                    .is_some_and(|component| component == Component::ParentDir)
+                {
+                    ret.push(component.as_os_str());
+                } else if ret.pop() {
+                    // We successfully removed a component.
+                } else if has_root {
+                    // An absolute path tried to go above the root.
                     return None;
+                } else {
+                    // If we don't have a root, we can just push the `..` component.
+                    ret.push(component.as_os_str());
                 }
             }
-            Component::Normal(segment) => {
-                resolved.push(segment);
+            Component::Normal(c) => {
+                ret.push(c);
             }
         }
     }
-    Some(resolved)
-}
 
-/// Normalize a path relative to a destination directory.
-pub(crate) fn normalize_relative(dst: &Path, p: &Path) -> Option<PathBuf> {
-    debug_assert!(!p.is_absolute(), "Target must be a relative path");
-    debug_assert!(dst.is_absolute(), "Destination must be an absolute path");
-
-    let mut resolved = dst.to_path_buf();
-    for component in p.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) => {
-                // E.g., `/usr` on Windows.
-                return None;
-            }
-            Component::CurDir => {
-                // Ignore `.`
-            }
-            Component::ParentDir => {
-                if !resolved.pop() {
-                    return None;
-                }
-            }
-            Component::Normal(segment) => {
-                resolved.push(segment);
-            }
-        }
-    }
-    Some(resolved)
+    Some(ret)
 }
 
 #[cfg(test)]
@@ -65,87 +55,107 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_normalize_absolute() {
-        // Basic absolute path.
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new("/a/b/c")),
-            Some(PathBuf::from("/a/b/c"))
-        );
-
-        // Path with `..` (should remove `b`).
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new("/a/b/../c")),
-            Some(PathBuf::from("/a/c"))
-        );
-
-        // Path with `.`, should be ignored.
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new("/a/./b")),
-            Some(PathBuf::from("/a/b"))
-        );
-
-        // Excessive `..` that escapes root.
-        assert_eq!(crate::fs::normalize_absolute(Path::new("/../b")), None);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_normalize_absolute() {
-        // Basic absolute path.
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new(r"C:\a\b\c")),
-            Some(PathBuf::from(r"C:\a\b\c"))
-        );
-
-        // Path with `..` (should remove `b`).
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new(r"C:\a\b\..\c")),
-            Some(PathBuf::from(r"C:\a\c"))
-        );
-
-        // Path with `.`, should be ignored.
-        assert_eq!(
-            crate::fs::normalize_absolute(Path::new(r"C:\a\.\b")),
-            Some(PathBuf::from(r"C:\a\b"))
-        );
-
-        // Excessive `..` that escapes root.
-        assert_eq!(crate::fs::normalize_absolute(Path::new(r"C:\..\b")), None);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_normalize_relative() {
-        let dst = Path::new("/home/user/dst");
-
+    fn test_normalize() {
         // Basic relative path.
         assert_eq!(
-            crate::fs::normalize_relative(dst, Path::new("a/b/c")),
-            Some(PathBuf::from("/home/user/dst/a/b/c"))
+            crate::fs::normalize(Path::new("a/b/c")),
+            Some(PathBuf::from("a/b/c"))
         );
 
         // Path with `..`, should remove `b`.
         assert_eq!(
-            crate::fs::normalize_relative(dst, Path::new("a/b/../c")),
-            Some(PathBuf::from("/home/user/dst/a/c"))
+            crate::fs::normalize(Path::new("a/b/../c")),
+            Some(PathBuf::from("a/c"))
         );
 
         // Path with `.` should be ignored.
         assert_eq!(
-            crate::fs::normalize_relative(dst, Path::new("./a/b")),
-            Some(PathBuf::from("/home/user/dst/a/b"))
+            crate::fs::normalize(Path::new("./a/b")),
+            Some(PathBuf::from("a/b"))
         );
 
-        // Path escaping `dst`, should return None.
+        // Path with no relative components should be unchanged.
         assert_eq!(
-            crate::fs::normalize_relative(dst, Path::new("../../../../outside")),
-            None
+            crate::fs::normalize(Path::new("outside")),
+            Some(PathBuf::from("outside"))
         );
 
-        // Excessive `..`, escaping `dst`.
+        // Excessive `..` should be ignored.
         assert_eq!(
-            crate::fs::normalize_relative(dst, Path::new("../../../../")),
-            None
+            crate::fs::normalize(Path::new("../../../../")),
+            Some(PathBuf::from("../../../../"),)
+        );
+
+        // Multiple `..` should stack.
+        assert_eq!(
+            crate::fs::normalize(Path::new("a/b/../../c")),
+            Some(PathBuf::from("c"))
+        );
+
+        // Rooted absolute path, `..` should not go above root.
+        assert_eq!(crate::fs::normalize(Path::new("/a/../..")), None);
+
+        // Root with dot and parent.
+        assert_eq!(
+            crate::fs::normalize(Path::new("/./a/../b")),
+            Some(PathBuf::from("/b"))
+        );
+
+        // Trailing slash should be ignored.
+        assert_eq!(
+            crate::fs::normalize(Path::new("a/b/c/")),
+            Some(PathBuf::from("a/b/c"))
+        );
+
+        // Trailing `/.` should be dropped.
+        assert_eq!(
+            crate::fs::normalize(Path::new("a/b/.")),
+            Some(PathBuf::from("a/b"))
+        );
+
+        // Trailing `/..` should pop last component.
+        assert_eq!(
+            crate::fs::normalize(Path::new("a/b/..")),
+            Some(PathBuf::from("a"))
+        );
+
+        // Leading `..` in a relative path should be preserved.
+        assert_eq!(
+            crate::fs::normalize(Path::new("../x/y")),
+            Some(PathBuf::from("../x/y"))
+        );
+
+        // Mix of preserved leading `..` and collapsed internals.
+        assert_eq!(
+            crate::fs::normalize(Path::new("../../a/b/../c")),
+            Some(PathBuf::from("../../a/c"))
+        );
+
+        // Windows drive absolute: C:\a\..\b
+        #[cfg(windows)]
+        assert_eq!(
+            crate::fs::normalize(Path::new(r"C:\a\..\b")),
+            Some(PathBuf::from(r"C:\b"))
+        );
+
+        // Windows drive-relative (no backslash): C:..\a
+        // should preserve the `..`
+        #[cfg(windows)]
+        assert_eq!(
+            crate::fs::normalize(Path::new(r"C:..\a")),
+            Some(PathBuf::from(r"C:..\a"))
+        );
+
+        // Root-only should normalize to root.
+        assert_eq!(
+            crate::fs::normalize(Path::new("/")),
+            Some(PathBuf::from("/"))
+        );
+
+        // Just `..` should normalize to `..`
+        assert_eq!(
+            crate::fs::normalize(Path::new("..")),
+            Some(PathBuf::from(".."))
         );
     }
 }
