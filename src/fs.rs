@@ -51,6 +51,7 @@ pub(crate) fn normalize(path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
 
     #[test]
