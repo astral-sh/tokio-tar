@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4
+
+* Fixed a path traversal vulnerability when using the `unpack_in_raw` API
+  by @charliermarsh
+
+    This vulnerability is being tracked as GHSA-3wgq-wrwc-vqmv.
+
 ## 0.5.3
 
 * Expose `TarError` publicly by @konstin in https://github.com/astral-sh/tokio-tar/pull/52
