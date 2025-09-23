@@ -666,11 +666,6 @@ impl<R: Read + Unpin> EntryFields<R> {
                         )));
                     };
 
-                    println!(
-                        "Absolute normalized symlink source: {}",
-                        absolute_normalized_path.display()
-                    );
-
                     // If the normalized path points outside the target directory, reject it.
                     if !target_base
                         .is_some_and(|target| absolute_normalized_path.starts_with(target))

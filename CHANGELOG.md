@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5
+
+* This is a corrective release for 0.5.4 to fix a debugging artifact that
+  was accidentally left in the release.
+
 ## 0.5.4
 
 * Fixed a path traversal vulnerability when using the `unpack_in_raw` API
