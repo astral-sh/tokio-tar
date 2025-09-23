@@ -18,6 +18,7 @@
 //     all just super thin wrappers (e.g. easy to codegen).
 
 #![deny(missing_docs)]
+#![deny(clippy::print_stderr, clippy::print_stdout)]
 
 use std::io::Error;
 
