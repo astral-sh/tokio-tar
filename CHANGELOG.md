@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6
+
+* Fixed a parser desynchronization vulnerability when reading tar archives that
+  contain mismatched size information in PAX/ustar headers.
+
+    This vulnerability is being tracked as GHSA-j5gw-2vrg-8fgx
+    and CVE-2025-62518.
+
 ## 0.5.5
 
 * This is a corrective release for 0.5.4 to fix a debugging artifact that
