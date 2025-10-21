@@ -15,12 +15,12 @@ use tokio::{
 };
 use tokio_stream::*;
 
-use crate::header::BLOCK_SIZE;
 use crate::{
     entry::{EntryFields, EntryIo},
     error::TarError,
     other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
 };
+use crate::{header::BLOCK_SIZE, pax::pax_extensions};
 
 /// A top-level representation of an archive file.
 ///
@@ -202,7 +202,7 @@ impl<R: Read + Unpin> Archive<R> {
         Ok(Entries {
             archive: self.clone(),
             pending: None,
-            current: (0, None, 0, None),
+            current: (0, None, 0, None, None),
             gnu_longlink: (false, None),
             gnu_longname: (false, None),
             pax_extensions: (false, None),
@@ -305,7 +305,13 @@ impl<R: Read + Unpin> Archive<R> {
 /// Stream of `Entry`s.
 pub struct Entries<R: Read + Unpin> {
     archive: Archive<R>,
-    current: (u64, Option<Header>, usize, Option<GnuExtSparseHeader>),
+    current: (
+        u64,
+        Option<Header>,
+        usize,
+        Option<GnuExtSparseHeader>,
+        Option<Vec<u8>>,
+    ),
     /// The [`Entry`] that is currently being processed.
     pending: Option<Entry<Archive<R>>>,
     /// GNU long name extension.
@@ -357,13 +363,15 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             let entry = if let Some(entry) = self.pending.take() {
                 entry
             } else {
-                let (next, current_header, current_header_pos, _) = &mut self.current;
+                let (next, current_header, current_header_pos, _, pax_extensions) =
+                    &mut self.current;
                 ready_opt_err!(poll_next_raw(
                     archive,
                     next,
                     current_header,
                     current_header_pos,
-                    cx
+                    cx,
+                    pax_extensions.as_deref(),
                 ))
             };
 
@@ -445,6 +453,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 }
 
                 self.pax_extensions.0 = true;
+                self.current.4 = self.pax_extensions.1.clone();
                 continue;
             }
 
@@ -463,7 +472,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             }
 
             let archive = self.archive.clone();
-            let (next, _, current_pos, current_ext) = &mut self.current;
+            let (next, _, current_pos, current_ext, _pax_extensions) = &mut self.current;
 
             ready_err!(poll_parse_sparse_header(
                 archive,
@@ -471,7 +480,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 current_ext,
                 current_pos,
                 &mut fields,
-                cx
+                cx,
             ));
 
             return Poll::Ready(Some(Ok(fields.into_entry())));
@@ -491,7 +500,7 @@ impl<R: Read + Unpin> Stream for RawEntries<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let archive = self.archive.clone();
         let (next, current_header, current_header_pos) = &mut self.current;
-        poll_next_raw(archive, next, current_header, current_header_pos, cx)
+        poll_next_raw(archive, next, current_header, current_header_pos, cx, None)
     }
 }
 
@@ -501,6 +510,7 @@ fn poll_next_raw<R: Read + Unpin>(
     current_header: &mut Option<Header>,
     current_header_pos: &mut usize,
     cx: &mut Context<'_>,
+    pax_extensions_data: Option<&[u8]>,
 ) -> Poll<Option<io::Result<Entry<Archive<R>>>>> {
     let mut header_pos = *next;
 
@@ -561,12 +571,65 @@ fn poll_next_raw<R: Read + Unpin>(
     }
 
     let file_pos = *next;
-    let size = header.entry_size()?;
+
+    let mut header = current_header.take().unwrap();
+
+    // note when pax extensions are available, the size from the header will be ignored
+    let mut size = header.entry_size()?;
+
+    // the size above will be overriden by the pax data if it has a size field.
+    // same for uid and gid, which will be overridden in the header itself.
+    if let Some(pax) = pax_extensions_data.map(pax_extensions) {
+        for extension in pax {
+            let extension = extension?;
+
+            // ignore keys that aren't parsable as a string at this stage.
+            // that isn't relevant to the size/uid/gid processing.
+            let Ok(key) = extension.key() else {
+                continue;
+            };
+
+            match key {
+                "size" => {
+                    let size_str = extension
+                        .value()
+                        .map_err(|_e| other("failed to parse pax size as string"))?;
+                    size = size_str
+                        .parse::<u64>()
+                        .map_err(|_e| other("failed to parse pax size"))?;
+                }
+
+                "uid" => {
+                    let uid_str = extension
+                        .value()
+                        .map_err(|_e| other("failed to parse pax uid as string"))?;
+                    header.set_uid(
+                        uid_str
+                            .parse::<u64>()
+                            .map_err(|_e| other("failed to parse pax uid"))?,
+                    );
+                }
+
+                "gid" => {
+                    let gid_str = extension
+                        .value()
+                        .map_err(|_e| other("failed to parse pax gid as string"))?;
+                    header.set_gid(
+                        gid_str
+                            .parse::<u64>()
+                            .map_err(|_e| other("failed to parse pax gid"))?,
+                    );
+                }
+
+                _ => {
+                    continue;
+                }
+            }
+        }
+    }
 
     let mut data = VecDeque::with_capacity(1);
     data.push_back(EntryIo::Data(archive.clone().take(size)));
-
-    let header = current_header.take().unwrap();
 
     let ret = EntryFields {
         size,

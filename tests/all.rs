@@ -977,6 +977,23 @@ async fn pax_path() {
 }
 
 #[tokio::test]
+async fn pax_precedence() {
+    let mut ar = Archive::new(tar!("pax-header-precedence.tar"));
+    let mut entries = t!(ar.entries());
+
+    let first = t!(entries.next().await.unwrap());
+    assert!(first.path().unwrap().ends_with("normal.txt"));
+
+    let second = t!(entries.next().await.unwrap());
+    assert!(second.path().unwrap().ends_with("blob.bin"));
+
+    let third = t!(entries.next().await.unwrap());
+    assert!(third.path().unwrap().ends_with("marker.txt"));
+
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn long_name_trailing_nul() {
     let mut b = Builder::new(Vec::<u8>::new());
 
