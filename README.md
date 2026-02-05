@@ -29,7 +29,7 @@ See the [changelog](CHANGELOG.md) for a more detailed list of changes.
 
 Evaluate your target filesystem's behavior before extracting arbitrary archives to disk. Otherwise, attackers may bypass path checks and filters by exploiting filesystem behaviors such as:
 
-- **Unicode Normalization**: Confusing NFC vs NFD sequences (e.g., `ß` vs `ss` on APFS). [(Docs unicode.org)](https://www.unicode.org/reports/tr36/tr36-15.html)
+- Unicode normalization: some OSes (like macOS) use Unicode's NFD normalization form for path handling, meaning that distinct byte sequences within an archive can normalize to the same path on disk.
 - Case folding: Some filesystems are case-insensitive or case-preseving, meaning that entries whose paths only vary by case may result in the same path on disk. For example, both APFS (macOS) and NTFS (Windows) exhibit case-insensitive/preserving behavior.
 - **Path Equivalence**: Other OS-specific rules that treat distinct byte sequences as the same file.
 
