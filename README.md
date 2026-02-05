@@ -25,14 +25,20 @@ the following modifications:
 
 See the [changelog](CHANGELOG.md) for a more detailed list of changes.
 
+## Security Considerations
+
+Evaluate your target filesystem's behavior before extracting arbitrary archives to disk. Otherwise, attackers may bypass path checks and filters by exploiting filesystem behaviors such as:
+
+- **Unicode Normalization**: Confusing NFC vs NFD sequences (e.g., `ß` vs `ss` on APFS). [(Docs unicode.org)](https://www.unicode.org/reports/tr36/tr36-15.html)
+- **Case Folding**: Case-insensitive collisions on default macOS (APFS)or Windows partitions.
+- **Path Equivalence**: Other OS-specific rules that treat distinct byte sequences as the same file.
+
 ## License
 
 This project is licensed under either of
 
- * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
 

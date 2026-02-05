@@ -119,6 +119,17 @@ impl<R: Read + Unpin> Entry<R> {
     ///
     /// It is recommended to use this method instead of inspecting the `header`
     /// directly to ensure that various archive formats are handled correctly.
+
+    /// # Security Considerations
+    ///
+    /// The returned path is not normalized. On filesystems with complex behaviors
+    /// (like Unicode normalization on APFS/HFS+ or case folding on Windows/macOS),
+    /// distinct byte sequences may resolve to the same file.
+    ///
+    /// See the "Security Considerations" section in the crate [README] for details on mitigating these risks.
+    ///
+    /// [README]: https://github.com/astral-sh/tokio-tar#security-considerations
+
     pub fn path(&self) -> io::Result<Cow<'_, Path>> {
         self.fields.path()
     }
