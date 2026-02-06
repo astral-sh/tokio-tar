@@ -129,7 +129,6 @@ impl<R: Read + Unpin> Entry<R> {
     /// See the "Security Considerations" section in the crate [README] for details on mitigating these risks.
     ///
     /// [README]: https://github.com/astral-sh/tokio-tar#security-considerations
-
     pub fn path(&self) -> io::Result<Cow<'_, Path>> {
         self.fields.path()
     }
