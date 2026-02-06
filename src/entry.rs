@@ -119,7 +119,7 @@ impl<R: Read + Unpin> Entry<R> {
     ///
     /// It is recommended to use this method instead of inspecting the `header`
     /// directly to ensure that various archive formats are handled correctly.
-
+    ///
     /// # Security Considerations
     ///
     /// The returned path is not normalized. On filesystems with complex behaviors
