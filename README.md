@@ -25,14 +25,20 @@ the following modifications:
 
 See the [changelog](CHANGELOG.md) for a more detailed list of changes.
 
+## Security Considerations
+
+Securely extracting an arbitrary (potentially malicious) archive to disk requires understanding the properties of the host OS and filesystem. Failing to account for how different OSes and filesystems process byte sequences in paths may allow an attacker to bypass application-level path filters by exploiting behaviors like:
+
+- Unicode normalization: some OSes (like macOS) use Unicode's NFD normalization form for path handling, meaning that distinct byte sequences within an archive can normalize to the same path on disk.
+- Case folding: Some filesystems are case-insensitive or case-preseving, meaning that entries whose paths only vary by case may result in the same path on disk. For example, both APFS (macOS) and NTFS (Windows) exhibit case-insensitive/preserving behavior.
+- Path equivalence: Other OS- or filesystem-specific rules that treat distinct byte sequences as the same file.
+
 ## License
 
 This project is licensed under either of
 
- * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
 
