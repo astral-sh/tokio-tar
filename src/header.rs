@@ -1513,8 +1513,11 @@ fn copy_path_into_inner(
 ) -> io::Result<()> {
     let mut emitted = false;
     let mut needs_slash = false;
-    let mut iter = path.components().peekable();
-    while let Some(component) = iter.next() {
+
+    let component_count = path.components().count();
+    let components = path.components().enumerate();
+
+    for (position, component) in components {
         let bytes = path2bytes(Path::new(component.as_os_str()))?;
         match (component, is_link_name) {
             (Component::Prefix(..), false) | (Component::RootDir, false) => {
@@ -1524,12 +1527,13 @@ fn copy_path_into_inner(
                 // If it's last component of a gnu long path we know that there might be more
                 // to the component than .. (the rest is stored elsewhere)
                 // Otherwise it's a clear error
-                if !is_truncated_gnu_long_path || iter.peek().is_some() {
+                let is_last_component = position == component_count - 1;
+                if !is_truncated_gnu_long_path || !is_last_component {
                     return Err(other("paths in archives must not have `..`"));
                 }
             }
-            // Allow "./" as the path
-            (Component::CurDir, false) if path.components().count() == 1 => {}
+            // Allow paths starting with "./" as the path
+            (Component::CurDir, false) if position == 0 => {}
             (Component::CurDir, false) => continue,
             (Component::Normal(_), _) | (_, true) => {}
         };
