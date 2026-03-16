@@ -78,7 +78,7 @@ async fn simple_concat() {
 
         while let Some(entry) = entries.next().await {
             let e = t!(entry);
-            names.push(t!(::std::str::from_utf8(&e.path_bytes())).to_string());
+            names.push(t!(::std::str::from_utf8(&t!(e.path_bytes()))).to_string());
         }
 
         names
@@ -203,7 +203,7 @@ async fn large_filename() {
 
     // The long entry added with `append_file`
     let mut f = entries.next().await.unwrap().unwrap();
-    assert_eq!(&*f.path_bytes(), too_long.as_bytes());
+    assert_eq!(&*t!(f.path_bytes()), too_long.as_bytes());
     assert_eq!(f.header().size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
@@ -212,7 +212,7 @@ async fn large_filename() {
     // The long entry added with `append_data`
     let mut f = entries.next().await.unwrap().unwrap();
     assert!(f.header().path_bytes().len() < too_long.len());
-    assert_eq!(&*f.path_bytes(), too_long.as_bytes());
+    assert_eq!(&*t!(f.path_bytes()), too_long.as_bytes());
     assert_eq!(f.header().size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
@@ -244,7 +244,7 @@ async fn large_filename_with_dot_dot_at_100_byte_mark() {
     let mut entries = t!(ar.entries());
 
     let mut f = t!(entries.next().await.unwrap());
-    assert_eq!(&*f.path_bytes(), long_name_with_dot_dot.as_bytes());
+    assert_eq!(&*t!(f.path_bytes()), long_name_with_dot_dot.as_bytes());
     assert_eq!(f.header().size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
@@ -1015,7 +1015,7 @@ async fn long_name_trailing_nul() {
     let mut a = Archive::new(&contents[..]);
 
     let e = t!(t!(a.entries()).next().await.unwrap());
-    assert_eq!(&*e.path_bytes(), b"foo");
+    assert_eq!(&*t!(e.path_bytes()), b"foo");
 }
 
 #[tokio::test]
@@ -1040,7 +1040,7 @@ async fn long_linkname_trailing_nul() {
     let mut a = Archive::new(&contents[..]);
 
     let e = t!(t!(a.entries()).next().await.unwrap());
-    assert_eq!(&*e.link_name_bytes().unwrap(), b"foo");
+    assert_eq!(&*t!(e.link_name_bytes()).unwrap(), b"foo");
 }
 
 #[tokio::test]
@@ -1228,11 +1228,11 @@ async fn path_separators() {
 
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), short_path);
-    assert!(!entry.path_bytes().contains(&b'\\'));
+    assert!(!t!(entry.path_bytes()).contains(&b'\\'));
 
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), long_path);
-    assert!(!entry.path_bytes().contains(&b'\\'));
+    assert!(!t!(entry.path_bytes()).contains(&b'\\'));
 
     assert!(entries.next().await.is_none());
 }

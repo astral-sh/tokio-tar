@@ -293,8 +293,24 @@ impl<R: Read + Unpin> Archive<R> {
         // child directories within those of more restrictive permissions. See [0] for details.
         //
         // [0]: <https://github.com/alexcrichton/tar-rs/issues/242>
-        directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
-        for mut dir in directories {
+
+        // Validate paths and pair with entries, then sort
+        let mut dirs_with_paths: Vec<(Entry<Archive<R>>, Vec<u8>)> = directories
+            .into_iter()
+            .map(|dir| {
+                let path = dir
+                    .path_bytes()
+                    .map_err(|e| TarError::new("failed to read directory path from archive", e))?
+                    .into_owned();
+                Ok((dir, path))
+            })
+            .collect::<io::Result<_>>()?;
+
+        // Sort by path (reverse order for topological sorting)
+        dirs_with_paths.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Unpack directories in sorted order
+        for (mut dir, _path) in dirs_with_paths {
             dir.unpack_in_raw(&dst, &mut targets).await?;
         }
 

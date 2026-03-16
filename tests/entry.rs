@@ -41,7 +41,7 @@ async fn absolute_symlink() {
     let mut ar = async_tar::Archive::new(&bytes[..]);
     let mut entries = t!(ar.entries());
     let entry = t!(entries.next().await.unwrap());
-    assert_eq!(&*entry.link_name_bytes().unwrap(), b"/bar");
+    assert_eq!(&*t!(entry.link_name_bytes()).unwrap(), b"/bar");
 }
 
 #[tokio::test]
@@ -461,4 +461,63 @@ async fn accept_relative_link() {
     t!(ar.unpack(td.path()).await);
     t!(td.path().join("foo/bar").symlink_metadata());
     t!(File::open(td.path().join("foo").join("bar")).await);
+}
+
+#[tokio::test]
+async fn malformed_pax_path_extension() {
+    // Create a tar archive with a malformed PAX extension for path
+    let mut ar_bytes = Vec::new();
+
+    // First, create a PAX extension header with malformed content
+    let mut pax_header = async_tar::Header::new_gnu();
+    pax_header.set_entry_type(async_tar::EntryType::new(b'x')); // PAX local extensions
+    t!(pax_header.set_path("PaxHeaders/file"));
+
+    // Create malformed PAX extension data - the length field doesn't match the actual content length
+    // Format is: "<length> <key>=<value>\n" where length includes itself
+    let malformed_pax = b"99 path=test.txt\n"; // Claims to be 99 bytes but is only 17 bytes
+    pax_header.set_size(malformed_pax.len() as u64);
+    pax_header.set_cksum();
+
+    // Manually write the archive
+    ar_bytes.extend_from_slice(pax_header.as_bytes());
+    ar_bytes.extend_from_slice(malformed_pax);
+    // Pad to 512 byte boundary
+    let padding = (512 - (malformed_pax.len() % 512)) % 512;
+    ar_bytes.extend_from_slice(&vec![0u8; padding]);
+
+    // Now add the actual file entry
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_path("file"));
+    header.set_cksum();
+    ar_bytes.extend_from_slice(header.as_bytes());
+    ar_bytes.extend_from_slice(b"test");
+    // Pad to 512 byte boundary
+    ar_bytes.extend_from_slice(&vec![0u8; 508]);
+
+    // Try to read the entries - malformed PAX data is now detected during iteration
+    let mut ar = async_tar::Archive::new(&ar_bytes[..]);
+    let mut entries = t!(ar.entries());
+
+    // This should return an error because the PAX extension is malformed
+    let result = entries.next().await.unwrap();
+    assert!(
+        result.is_err(),
+        "Expected error for malformed PAX extension"
+    );
+
+    // Verify it's a PAX-related error
+    match result {
+        Err(e) => {
+            let err_str = e.to_string();
+            assert!(
+                err_str.contains("malformed pax extension"),
+                "Expected 'malformed pax extension' error, got: {}",
+                err_str
+            );
+        }
+        Ok(_) => panic!("Expected error but got Ok"),
+    }
 }

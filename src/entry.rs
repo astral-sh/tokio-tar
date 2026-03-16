@@ -139,7 +139,9 @@ impl<R: Read + Unpin> Entry<R> {
     /// separators, and it will not always return the same value as
     /// `self.header().path_bytes()` as some archive formats have support for
     /// longer path names described in separate entries.
-    pub fn path_bytes(&self) -> Cow<'_, [u8]> {
+    ///
+    /// This method may return an error if PAX extensions are malformed.
+    pub fn path_bytes(&self) -> io::Result<Cow<'_, [u8]>> {
         self.fields.path_bytes()
     }
 
@@ -165,7 +167,9 @@ impl<R: Read + Unpin> Entry<R> {
     /// Note that this will not always return the same value as
     /// `self.header().link_name_bytes()` as some archive formats have support for
     /// longer path names described in separate entries.
-    pub fn link_name_bytes(&self) -> Option<Cow<'_, [u8]>> {
+    ///
+    /// This method may return an error if PAX extensions are malformed.
+    pub fn link_name_bytes(&self) -> io::Result<Option<Cow<'_, [u8]>>> {
         self.fields.link_name_bytes()
     }
 
@@ -388,65 +392,69 @@ impl<R: Read + Unpin> EntryFields<R> {
     }
 
     fn path(&self) -> io::Result<Cow<'_, Path>> {
-        bytes2path(self.path_bytes())
+        bytes2path(self.path_bytes()?)
     }
 
-    fn path_bytes(&self) -> Cow<'_, [u8]> {
+    fn path_bytes(&self) -> io::Result<Cow<'_, [u8]>> {
         match self.long_pathname {
             Some(ref bytes) => {
                 if let Some(&0) = bytes.last() {
-                    Cow::Borrowed(&bytes[..bytes.len() - 1])
+                    Ok(Cow::Borrowed(&bytes[..bytes.len() - 1]))
                 } else {
-                    Cow::Borrowed(bytes)
+                    Ok(Cow::Borrowed(bytes))
                 }
             }
             None => {
                 if let Some(ref pax) = self.pax_extensions {
-                    let pax = pax_extensions(pax)
-                        .filter_map(|f| f.ok())
-                        .find(|f| f.key_bytes() == b"path")
-                        .map(|f| f.value_bytes());
-                    if let Some(field) = pax {
-                        return Cow::Borrowed(field);
+                    // Check for malformed PAX extensions and return hard error
+                    for ext in pax_extensions(pax) {
+                        let ext = ext?; // Propagate error instead of silently dropping
+                        if ext.key_bytes() == b"path" {
+                            return Ok(Cow::Borrowed(ext.value_bytes()));
+                        }
                     }
                 }
-                self.header.path_bytes()
+                Ok(self.header.path_bytes())
             }
         }
     }
 
     /// Gets the path in a "lossy" way, used for error reporting ONLY.
     fn path_lossy(&self) -> String {
-        String::from_utf8_lossy(&self.path_bytes()).to_string()
+        // If path_bytes() fails, fall back to the header path for error reporting
+        match self.path_bytes() {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => String::from_utf8_lossy(&self.header.path_bytes()).to_string(),
+        }
     }
 
     fn link_name(&self) -> io::Result<Option<Cow<'_, Path>>> {
-        match self.link_name_bytes() {
+        match self.link_name_bytes()? {
             Some(bytes) => bytes2path(bytes).map(Some),
             None => Ok(None),
         }
     }
 
-    fn link_name_bytes(&self) -> Option<Cow<'_, [u8]>> {
+    fn link_name_bytes(&self) -> io::Result<Option<Cow<'_, [u8]>>> {
         match self.long_linkname {
             Some(ref bytes) => {
                 if let Some(&0) = bytes.last() {
-                    Some(Cow::Borrowed(&bytes[..bytes.len() - 1]))
+                    Ok(Some(Cow::Borrowed(&bytes[..bytes.len() - 1])))
                 } else {
-                    Some(Cow::Borrowed(bytes))
+                    Ok(Some(Cow::Borrowed(bytes)))
                 }
             }
             None => {
                 if let Some(ref pax) = self.pax_extensions {
-                    let pax = pax_extensions(pax)
-                        .filter_map(|f| f.ok())
-                        .find(|f| f.key_bytes() == b"linkpath")
-                        .map(|f| f.value_bytes());
-                    if let Some(field) = pax {
-                        return Some(Cow::Borrowed(field));
+                    // Check for malformed PAX extensions and return hard error
+                    for ext in pax_extensions(pax) {
+                        let ext = ext?; // Propagate error instead of silently dropping
+                        if ext.key_bytes() == b"linkpath" {
+                            return Ok(Some(Cow::Borrowed(ext.value_bytes())));
+                        }
                     }
                 }
-                self.header.link_name_bytes()
+                Ok(self.header.link_name_bytes())
             }
         }
     }
@@ -744,7 +752,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         // Old BSD-tar compatibility.
         // Names that have a trailing slash should be treated as a directory.
         // Only applies to old headers.
-        if self.header.as_ustar().is_none() && self.path_bytes().ends_with(b"/") {
+        if self.header.as_ustar().is_none() && self.path_bytes()?.ends_with(b"/") {
             self.unpack_dir(dst).await?;
             if self.preserve_permissions {
                 if let Ok(mode) = self.header.mode() {
@@ -908,14 +916,17 @@ impl<R: Read + Unpin> EntryFields<R> {
                 Ok(Some(e)) => e,
                 _ => return Ok(()),
             };
-            let exts = exts
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let key = e.key_bytes();
-                    let prefix = b"SCHILY.xattr.";
-                    key.strip_prefix(prefix).map(|rest| (rest, e))
-                })
-                .map(|(key, e)| (OsStr::from_bytes(key), e.value_bytes()));
+            // Process xattr extensions, propagating errors instead of silently dropping them
+            let mut xattrs = Vec::new();
+            for ext in exts {
+                let ext = ext?; // Propagate error instead of silently dropping
+                let key = ext.key_bytes();
+                let prefix = b"SCHILY.xattr.";
+                if let Some(rest) = key.strip_prefix(prefix) {
+                    xattrs.push((OsStr::from_bytes(rest), ext.value_bytes()));
+                }
+            }
+            let exts = xattrs.into_iter();
 
             for (key, value) in exts {
                 xattr::set(dst, key, value).map_err(|e| {
