@@ -594,9 +594,21 @@ fn poll_next_raw<R: Read + Unpin>(
     // note when pax extensions are available, the size from the header will be ignored
     let mut size = header.entry_size()?;
 
+    // PAX extensions describe the next *file entry*, not intermediary extensions.
+    // See: "pax Header Block," `x` typeflag:
+    // Ref: <https://pubs.opengroup.org/onlinepubs/9799919799/utilities/pax.html>
+    let entry_type = header.entry_type();
+    let is_extension_header = entry_type.is_gnu_longname()
+        || entry_type.is_gnu_longlink()
+        || entry_type.is_pax_local_extensions()
+        || entry_type.is_pax_global_extensions();
+
     // the size above will be overriden by the pax data if it has a size field.
     // same for uid and gid, which will be overridden in the header itself.
-    if let Some(pax) = pax_extensions_data.map(pax_extensions) {
+    if let Some(pax) = pax_extensions_data
+        .filter(|_| !is_extension_header)
+        .map(pax_extensions)
+    {
         for extension in pax {
             let extension = extension?;
 
