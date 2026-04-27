@@ -521,3 +521,64 @@ async fn malformed_pax_path_extension() {
         Ok(_) => panic!("Expected error but got Ok"),
     }
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn symlink_dir_collision_does_not_chmod_external_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = t!(Builder::new().prefix("tar").tempdir());
+
+    // Set up our target directory outside the extraction root with 0700.
+    let target = td.path().join("target-dir");
+    t!(fs::create_dir(&target).await);
+    t!(fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).await);
+    let before = t!(fs::metadata(&target).await).permissions().mode() & 0o7777;
+    assert_eq!(before, 0o700);
+
+    // Set up our extraction directory.
+    let extract = td.path().join("extract");
+    t!(fs::create_dir(&extract).await);
+
+    let mut ar = async_tar::Builder::new(Vec::new());
+
+    // Add the entries to the archive: one symlink to the target, followed by
+    // another entry of the same name that sets the target to 0777.
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_path("foo"));
+    t!(header.set_link_name(&target));
+    header.set_mode(0o777);
+    header.set_cksum();
+    t!(ar.append(&header, &[][..]).await);
+
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(async_tar::EntryType::Directory);
+    t!(header.set_path("foo"));
+    header.set_mode(0o777);
+    header.set_cksum();
+    t!(ar.append(&header, &[][..]).await);
+
+    // Get our raw archive.
+    let bytes = t!(ar.into_inner().await);
+
+    // Reopen it with permission preservation enabled.
+    let mut ar = ArchiveBuilder::new(&bytes[..])
+        .set_preserve_permissions(true)
+        .build();
+
+    // Ensure that we get an error on unpack.
+    assert!(ar.unpack(&extract).await.is_err());
+
+    // Also ensure that we still have a symlink and that it didn't turn into a
+    // directory.
+    assert!(t!(extract.join("foo").symlink_metadata())
+        .file_type()
+        .is_symlink());
+
+    // Finally, ensure that the target directory is still 0700.
+    let after = t!(fs::metadata(&target).await).permissions().mode() & 0o7777;
+    assert_eq!(after, 0o700);
+}

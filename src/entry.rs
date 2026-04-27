@@ -567,7 +567,7 @@ impl<R: Read + Unpin> EntryFields<R> {
             Ok(()) => Ok(()),
             Err(err) => {
                 if err.kind() == ErrorKind::AlreadyExists {
-                    let prev = fs::metadata(dst).await;
+                    let prev = fs::symlink_metadata(dst).await;
                     if prev.map(|m| m.is_dir()).unwrap_or(false) {
                         return Ok(());
                     }
