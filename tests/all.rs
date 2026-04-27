@@ -1506,3 +1506,53 @@ async fn header_size_overflow() {
         err
     );
 }
+
+#[tokio::test]
+async fn pax_hidden_entry() {
+    let bytes = tar!("pax-hidden-entry.tar");
+    let mut archive = Archive::new(bytes);
+
+    // This archive has three entries: file_a, file_b, and hidden. One of these
+    // entries (imaginatively called `hidden`) was invisible in older versions
+    // of tokio-tar.
+    let entries = t!(archive.entries())
+        .map(|entry_result| {
+            let entry = t!(entry_result);
+            let path = t!(entry.path());
+            path.to_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        vec![
+            String::from("file_a"),
+            String::from("file_b"),
+            String::from("hidden"),
+        ],
+        entries
+    );
+}
+
+#[tokio::test]
+async fn pax_phantom_entry() {
+    let bytes = tar!("pax-phantom-entry.tar");
+    let mut archive = Archive::new(bytes);
+
+    // This archive has two entries: file_a, and file_b. Older versions of
+    // tokio-tar will see a third entry called `phantom`, however, due to a bug
+    // in PAX state handling.
+    let entries = t!(archive.entries())
+        .map(|entry_result| {
+            let entry = t!(entry_result);
+            let path = t!(entry.path());
+            path.to_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        vec![String::from("file_a"), String::from("file_b")],
+        entries
+    );
+}

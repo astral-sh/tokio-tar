@@ -485,6 +485,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             if self.pax_extensions.0 {
                 fields.pax_extensions = self.pax_extensions.1.take();
                 self.pax_extensions.0 = false;
+                self.current.4 = None;
             }
 
             let archive = self.archive.clone();
