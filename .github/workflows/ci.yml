@@ -28,7 +28,7 @@ jobs:
       - name: "Install latest stable Rust"
         run: rustup update
       - run: cargo fmt --all -- --check
-      - uses: taiki-e/install-action@5c27e59d8c472d2a91731d8b5d7fe040fad53387 # v2.58.18
+      - uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458 # v2.75.19
         with:
           tool: cargo-hack
       - run: cargo hack check --all --ignore-private --each-feature --no-dev-deps
