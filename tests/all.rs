@@ -1556,3 +1556,31 @@ async fn pax_phantom_entry() {
         entries
     );
 }
+
+#[tokio::test]
+async fn pax_size_does_not_apply_to_extension_headers() {
+    // This archive is ordered as `x (PAX) -> L (GNU longname) -> file_a -> file_b`,
+    // where the PAX `x` record declares `size=2048`. If that `size=` is wrongly
+    // applied to the intermediary `L` header, the parser advances the cursor by
+    // 2048 bytes after `L` instead of by `L`'s true 12-byte payload, lands in
+    // the middle of `file_a`'s body, and bails out with a checksum mismatch —
+    // hiding both `file_a` and `file_b` from the entry stream. Correct parsing
+    // applies PAX only to the next *file* entry, so the L longname renames
+    // `file_a` to `longname.txt` and the stream yields ["longname.txt", "file_b"].
+    let bytes = tar!("pax-overrides-extension-header.tar");
+    let mut archive = Archive::new(bytes);
+
+    let entries = t!(archive.entries())
+        .map(|entry_result| {
+            let entry = t!(entry_result);
+            let path = t!(entry.path());
+            path.to_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        vec![String::from("longname.txt"), String::from("file_b")],
+        entries
+    );
+}
