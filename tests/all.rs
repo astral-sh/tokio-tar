@@ -334,6 +334,7 @@ async fn append_data_long_path_uses_pax() {
 #[tokio::test]
 async fn append_data_numeric_overflows_use_pax() {
     let mut ar = Builder::new(Vec::new());
+    let path = "numeric-overflow-path".repeat(30);
     let uid = 2_097_152 + 7;
     let gid = 2_097_152 + 9;
     let mtime = 8_589_934_592 + 11;
@@ -343,7 +344,7 @@ async fn append_data_numeric_overflows_use_pax() {
     header.set_gid(gid);
     header.set_mtime(mtime);
 
-    t!(ar.append_data(&mut header, "overflow", &[][..]).await);
+    t!(ar.append_data(&mut header, &path, &[][..]).await);
 
     let contents = t!(ar.into_inner().await);
     let mut raw = Archive::new(&contents[..]);
@@ -352,6 +353,7 @@ async fn append_data_numeric_overflows_use_pax() {
     assert_eq!(
         pax_records(&mut pax).await,
         vec![
+            ("path".to_owned(), path.clone()),
             ("uid".to_owned(), uid.to_string()),
             ("gid".to_owned(), gid.to_string()),
             ("mtime".to_owned(), mtime.to_string()),
@@ -362,10 +364,13 @@ async fn append_data_numeric_overflows_use_pax() {
     assert_eq!(t!(payload.header().uid()), 0);
     assert_eq!(t!(payload.header().gid()), 0);
     assert_eq!(t!(payload.header().mtime()), 0);
+    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
+    assert!(entries.next().await.is_none());
 
     let mut decoded = Archive::new(&contents[..]);
     let mut entries = t!(decoded.entries());
     let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.path_bytes()), path.as_bytes());
     assert_eq!(t!(entry.header().uid()), uid);
     assert_eq!(t!(entry.header().gid()), gid);
     assert_eq!(t!(entry.header().mtime()), mtime);
@@ -1525,12 +1530,13 @@ async fn append_path_long_symlink_uses_pax() {
 
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let source = td.path().join("source");
+    let archive_path = "symlink-path".repeat(30);
     let target = "link-target".repeat(20);
     t!(symlink(&target, &source));
 
     let mut ar = Builder::new(Vec::new());
     ar.follow_symlinks(false);
-    t!(ar.append_path_with_name(&source, "symlink").await);
+    t!(ar.append_path_with_name(&source, &archive_path).await);
 
     let contents = t!(ar.into_inner().await);
     let mut raw = Archive::new(&contents[..]);
@@ -1541,14 +1547,19 @@ async fn append_path_long_symlink_uses_pax() {
     assert!(pax.header().as_gnu().is_none());
     assert_eq!(
         pax_records(&mut pax).await,
-        vec![("linkpath".to_owned(), target)]
+        vec![
+            ("path".to_owned(), archive_path),
+            ("linkpath".to_owned(), target),
+        ]
     );
 
     let payload = t!(entries.next().await.unwrap());
     assert!(payload.header().as_ustar().is_some());
     assert!(payload.header().as_gnu().is_none());
     assert!(!payload.header().entry_type().is_gnu_longlink());
+    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
     assert!(payload.header().link_name_bytes().is_none());
+    assert!(entries.next().await.is_none());
 }
 
 #[tokio::test]
@@ -1716,7 +1727,23 @@ async fn tar_directory_containing_special_files() {
     t!(env::set_current_dir("/dev/"));
     // CI systems seem to have issues with creating a chr device
     t!(ar.append_path("null").await);
-    t!(ar.finish().await);
+
+    let contents = t!(ar.into_inner().await);
+    let mut raw = Archive::new(&contents[..]);
+    let mut entries = t!(raw.entries_raw());
+    let mut entry_count = 0;
+    while let Some(entry) = entries.next().await {
+        let entry = t!(entry);
+        let header = entry.header();
+        let entry_type = header.entry_type();
+        assert!(header.as_ustar().is_some());
+        assert!(header.as_gnu().is_none());
+        assert!(!entry_type.is_gnu_longname());
+        assert!(!entry_type.is_gnu_longlink());
+        assert!(!entry_type.is_gnu_sparse());
+        entry_count += 1;
+    }
+    assert!(entry_count >= 3);
 }
 
 #[tokio::test]
