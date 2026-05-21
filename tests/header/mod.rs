@@ -10,38 +10,46 @@ use std::{
 
 use tempfile::Builder;
 
-use async_tar::{GnuHeader, Header, HeaderMode};
+use async_tar::{GnuHeader, Header, HeaderMode, OldHeader, UstarHeader};
+
+fn gnu_header() -> GnuHeader {
+    let mut header: GnuHeader = unsafe { mem::zeroed() };
+    header.magic = *b"ustar ";
+    header.version = *b" \0";
+    header.mtime = *b"00000000000\0";
+    header
+}
+
+fn old_header() -> OldHeader {
+    let mut header: OldHeader = unsafe { mem::zeroed() };
+    header.mtime = *b"00000000000\0";
+    header
+}
 
 #[test]
-fn default_gnu() {
-    let mut h = Header::new_gnu();
-    assert!(h.as_gnu().is_some());
-    assert!(h.as_gnu_mut().is_some());
-    assert!(h.as_ustar().is_none());
-    assert!(h.as_ustar_mut().is_none());
+fn goto_gnu() {
+    let h = gnu_header();
+    assert!(h.as_header().as_gnu().is_some());
+    assert!(h.as_header().as_ustar().is_none());
 }
 
 #[test]
 fn goto_old() {
-    let mut h = Header::new_old();
-    assert!(h.as_gnu().is_none());
-    assert!(h.as_gnu_mut().is_none());
-    assert!(h.as_ustar().is_none());
-    assert!(h.as_ustar_mut().is_none());
+    let h = old_header();
+    assert!(h.as_header().as_gnu().is_none());
+    assert!(h.as_header().as_ustar().is_none());
 }
 
 #[test]
 fn goto_ustar() {
-    let mut h = Header::new_ustar();
+    let h = Header::new_ustar();
     assert!(h.as_gnu().is_none());
-    assert!(h.as_gnu_mut().is_none());
     assert!(h.as_ustar().is_some());
-    assert!(h.as_ustar_mut().is_some());
 }
 
 #[test]
 fn link_name() {
-    let mut h = Header::new_gnu();
+    let mut h = Header::new_ustar();
     t!(h.set_link_name("foo"));
     assert_eq!(t!(h.link_name()).unwrap().to_str(), Some("foo"));
     t!(h.set_link_name("../foo"));
@@ -55,82 +63,84 @@ fn link_name() {
         assert_eq!(t!(h.link_name()).unwrap().to_str(), Some("foo\\ba"));
     }
 
-    let name = "foo\\bar\0";
-    for (slot, val) in h.as_old_mut().linkname.iter_mut().zip(name.as_bytes()) {
-        *slot = *val;
-    }
-    assert_eq!(t!(h.link_name()).unwrap().to_str(), Some("foo\\bar"));
+    let mut raw: UstarHeader = unsafe { mem::zeroed() };
+    raw.magic = *b"ustar\0";
+    raw.version = *b"00";
+    raw.linkname[..8].copy_from_slice(b"foo\\bar\0");
+    assert_eq!(
+        t!(raw.as_header().link_name()).unwrap().to_str(),
+        Some("foo\\bar")
+    );
 
     assert!(h.set_link_name("\0").is_err());
 }
 
 #[test]
 fn mtime() {
-    let h = Header::new_gnu();
-    assert_eq!(t!(h.mtime()), 0);
+    let h = gnu_header();
+    assert_eq!(t!(h.as_header().mtime()), 0);
 
     let h = Header::new_ustar();
     assert_eq!(t!(h.mtime()), 0);
 
-    let h = Header::new_old();
-    assert_eq!(t!(h.mtime()), 0);
+    let h = old_header();
+    assert_eq!(t!(h.as_header().mtime()), 0);
 }
 
 #[test]
 fn user_and_group_name() {
-    let mut h = Header::new_gnu();
+    let mut h = gnu_header();
+    h.uname[..3].copy_from_slice(b"foo");
+    h.gname[..3].copy_from_slice(b"bar");
+    assert_eq!(t!(h.as_header().username()), Some("foo"));
+    assert_eq!(t!(h.as_header().groupname()), Some("bar"));
+
+    let mut h = Header::new_ustar();
     t!(h.set_username("foo"));
     t!(h.set_groupname("bar"));
     assert_eq!(t!(h.username()), Some("foo"));
     assert_eq!(t!(h.groupname()), Some("bar"));
 
-    h = Header::new_ustar();
-    t!(h.set_username("foo"));
-    t!(h.set_groupname("bar"));
-    assert_eq!(t!(h.username()), Some("foo"));
-    assert_eq!(t!(h.groupname()), Some("bar"));
-
-    h = Header::new_old();
-    assert_eq!(t!(h.username()), None);
-    assert_eq!(t!(h.groupname()), None);
-    assert!(h.set_username("foo").is_err());
-    assert!(h.set_groupname("foo").is_err());
+    let h = old_header();
+    assert_eq!(t!(h.as_header().username()), None);
+    assert_eq!(t!(h.as_header().groupname()), None);
 }
 
 #[test]
 fn dev_major_minor() {
-    let mut h = Header::new_gnu();
+    let mut h = gnu_header();
+    h.dev_major = *b"0000001\0";
+    h.dev_minor = *b"0000002\0";
+    assert_eq!(t!(h.as_header().device_major()), Some(1));
+    assert_eq!(t!(h.as_header().device_minor()), Some(2));
+
+    let mut h = Header::new_ustar();
     t!(h.set_device_major(1));
     t!(h.set_device_minor(2));
     assert_eq!(t!(h.device_major()), Some(1));
     assert_eq!(t!(h.device_minor()), Some(2));
 
-    h = Header::new_ustar();
-    t!(h.set_device_major(1));
-    t!(h.set_device_minor(2));
-    assert_eq!(t!(h.device_major()), Some(1));
-    assert_eq!(t!(h.device_minor()), Some(2));
+    let mut raw: UstarHeader = unsafe { mem::zeroed() };
+    raw.magic = *b"ustar\0";
+    raw.version = *b"00";
+    raw.dev_minor[0] = 0x7f;
+    raw.dev_major[0] = 0x7f;
+    assert!(raw.as_header().device_major().is_err());
+    assert!(raw.as_header().device_minor().is_err());
 
-    h.as_ustar_mut().unwrap().dev_minor[0] = 0x7f;
-    h.as_ustar_mut().unwrap().dev_major[0] = 0x7f;
-    assert!(h.device_major().is_err());
-    assert!(h.device_minor().is_err());
+    raw.dev_minor[0] = b'g';
+    raw.dev_major[0] = b'h';
+    assert!(raw.as_header().device_major().is_err());
+    assert!(raw.as_header().device_minor().is_err());
 
-    h.as_ustar_mut().unwrap().dev_minor[0] = b'g';
-    h.as_ustar_mut().unwrap().dev_major[0] = b'h';
-    assert!(h.device_major().is_err());
-    assert!(h.device_minor().is_err());
-
-    h = Header::new_old();
-    assert_eq!(t!(h.device_major()), None);
-    assert_eq!(t!(h.device_minor()), None);
-    assert!(h.set_device_major(1).is_err());
-    assert!(h.set_device_minor(1).is_err());
+    let h = old_header();
+    assert_eq!(t!(h.as_header().device_major()), None);
+    assert_eq!(t!(h.as_header().device_minor()), None);
 }
 
 #[test]
 fn set_path() {
-    let mut h = Header::new_gnu();
+    let mut h = Header::new_ustar();
     t!(h.set_path("foo"));
     assert_eq!(t!(h.path()).to_str(), Some("foo"));
     t!(h.set_path("foo/"));
@@ -156,7 +166,8 @@ fn set_path() {
 
     assert!(h.set_path(&long_name).is_err());
     assert!(h.set_path(&medium1).is_err());
-    assert!(h.set_path(&medium2).is_err());
+    t!(h.set_path(&medium2));
+    assert_eq!(t!(h.path()).to_str(), Some(&medium2[..]));
     assert!(h.set_path("\0").is_err());
 
     assert!(h.set_path("..").is_err());
@@ -219,24 +230,35 @@ fn set_metadata_deterministic() {
 
 #[test]
 fn extended_numeric_format() {
+    let mut header = Header::new_ustar();
+    header.set_size(42);
+    assert_eq!(
+        header.as_old().size,
+        [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 50, 0]
+    );
+    header.set_size(8589934593);
+    assert_eq!(
+        header.as_old().size,
+        [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 1]
+    );
+    header.set_size(44);
+    assert_eq!(
+        header.as_old().size,
+        [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 52, 0]
+    );
+
     let mut h: GnuHeader = unsafe { mem::zeroed() };
-    h.as_header_mut().set_size(42);
-    assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 50, 0]);
-    h.as_header_mut().set_size(8589934593);
-    assert_eq!(h.size, [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 1]);
-    h.as_header_mut().set_size(44);
-    assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 52, 0]);
     h.size = [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0];
     assert_eq!(h.as_header().entry_size().unwrap(), 0x0200000000);
     h.size = [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 51, 0];
     assert_eq!(h.as_header().entry_size().unwrap(), 43);
 
-    h.as_header_mut().set_gid(42);
-    assert_eq!(h.gid, [48, 48, 48, 48, 48, 53, 50, 0]);
-    assert_eq!(h.as_header().gid().unwrap(), 42);
-    h.as_header_mut().set_gid(0x7fffffffffffffff);
-    assert_eq!(h.gid, [0xff; 8]);
-    assert_eq!(h.as_header().gid().unwrap(), 0x7fffffffffffffff);
+    header.set_gid(42);
+    assert_eq!(header.as_old().gid, [48, 48, 48, 48, 48, 53, 50, 0]);
+    assert_eq!(header.gid().unwrap(), 42);
+    header.set_gid(0x7fffffffffffffff);
+    assert_eq!(header.as_old().gid, [0xff; 8]);
+    assert_eq!(header.gid().unwrap(), 0x7fffffffffffffff);
     h.uid = [0x80, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78];
     assert_eq!(h.as_header().uid().unwrap(), 0x12345678);
 
@@ -255,7 +277,7 @@ fn extended_numeric_format() {
 
 #[test]
 fn byte_slice_conversion() {
-    let h = Header::new_gnu();
+    let h = Header::new_ustar();
     let b: &[u8] = h.as_bytes();
     let b_conv: &[u8] = Header::from_byte_slice(h.as_bytes()).as_bytes();
     assert_eq!(b, b_conv);

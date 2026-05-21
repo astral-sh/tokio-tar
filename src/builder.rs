@@ -1,11 +1,11 @@
 use crate::{
-    header::{path2bytes, HeaderMode},
+    header::{link_name2pax_bytes, path2pax_bytes, HeaderMode},
     other, EntryType, Header,
 };
-use std::{fs::Metadata, path::Path, str};
+use std::{fs::Metadata, path::Path};
 use tokio::{
     fs,
-    io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
+    io::{self, AsyncRead as Read, AsyncWrite as Write, AsyncWriteExt},
 };
 
 /// A structure for building archives
@@ -134,7 +134,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// use tokio_tar::{Builder, Header};
     ///
-    /// let mut header = Header::new_gnu();
+    /// let mut header = Header::new_ustar();
     /// header.set_path("foo")?;
     /// header.set_size(4);
     /// header.set_cksum();
@@ -152,6 +152,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
         header: &Header,
         mut data: R,
     ) -> io::Result<()> {
+        validate_header_for_write(header)?;
         append(self.get_mut(), header, &mut data).await?;
 
         Ok(())
@@ -160,7 +161,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// Adds a new entry to this archive with the specified path.
     ///
     /// This function will set the specified path in the given header, which may
-    /// require appending a GNU long-name extension entry to the archive first.
+    /// require appending a PAX extension entry to the archive first.
     /// The checksum for the header will be automatically updated via the
     /// `set_cksum` method after setting the path. No other metadata in the
     /// header will be modified.
@@ -189,7 +190,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// use tokio_tar::{Builder, Header};
     ///
-    /// let mut header = Header::new_gnu();
+    /// let mut header = Header::new_ustar();
     /// header.set_size(4);
     /// header.set_cksum();
     ///
@@ -207,7 +208,12 @@ impl<W: Write + Unpin + Send> Builder<W> {
         path: P,
         data: R,
     ) -> io::Result<()> {
-        prepare_header_path(self.get_mut(), header, path.as_ref()).await?;
+        validate_header_format_for_write(header)?;
+        let mut pax_extensions = Vec::new();
+        prepare_header_path(header, path.as_ref(), &mut pax_extensions)?;
+        prepare_header_numeric_fields(header, &mut pax_extensions)?;
+        validate_header_for_write(header)?;
+        append_pax_extensions(self.get_mut(), &pax_extensions).await?;
         header.set_cksum();
         self.append(header, data).await?;
 
@@ -456,6 +462,192 @@ async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
     Ok(())
 }
 
+const PAX_HEADER_PATH: &str = "PaxHeaders/pax-entry";
+const PAX_PAYLOAD_PATH: &str = "pax-entry";
+
+struct PaxExtension {
+    key: &'static [u8],
+    value: Vec<u8>,
+}
+
+fn validate_header_for_write(header: &Header) -> io::Result<()> {
+    validate_header_format_for_write(header)?;
+    if header_has_base256_numeric_fields(header) {
+        return Err(other(
+            "cannot append a header with base-256 numeric fields to a USTAR/PAX archive",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_header_format_for_write(header: &Header) -> io::Result<()> {
+    if header.as_ustar().is_none() {
+        return Err(other("cannot append a non-USTAR header"));
+    }
+
+    let entry_type = header.entry_type();
+    if !entry_type.is_ustar_or_pax_writer() {
+        if entry_type.is_gnu_longname()
+            || entry_type.is_gnu_longlink()
+            || entry_type.is_gnu_sparse()
+        {
+            return Err(other("cannot append a GNU extension header"));
+        }
+        return Err(other("cannot append an unknown extension header"));
+    }
+
+    Ok(())
+}
+
+fn header_has_base256_numeric_fields(header: &Header) -> bool {
+    fn is_base256(field: &[u8]) -> bool {
+        field.first().is_some_and(|byte| byte & 0x80 != 0)
+    }
+
+    let old = header.as_old();
+    is_base256(&old.mode)
+        || is_base256(&old.uid)
+        || is_base256(&old.gid)
+        || is_base256(&old.size)
+        || is_base256(&old.mtime)
+        || header
+            .as_ustar()
+            .is_some_and(|ustar| is_base256(&ustar.dev_major) || is_base256(&ustar.dev_minor))
+}
+
+async fn append_pax_extensions<Dst: Write + Unpin + ?Sized>(
+    dst: &mut Dst,
+    extensions: &[PaxExtension],
+) -> io::Result<()> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
+
+    let mut data = Vec::new();
+    for extension in extensions {
+        append_pax_record(&mut data, extension.key, &extension.value)?;
+    }
+
+    let mut header = Header::new_ustar();
+    header.set_path(PAX_HEADER_PATH)?;
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(data.len() as u64);
+    header.set_entry_type_unchecked(EntryType::XHeader);
+    validate_header_for_write(&header)?;
+    header.set_cksum();
+
+    append(dst, &header, &mut &data[..]).await
+}
+
+fn append_pax_record(dst: &mut Vec<u8>, key: &[u8], value: &[u8]) -> io::Result<()> {
+    let record_content_len = key
+        .len()
+        .checked_add(value.len())
+        .and_then(|len| len.checked_add(3))
+        .ok_or_else(|| other("pax extension is too long"))?;
+    let mut record_len = record_content_len
+        .checked_add(1)
+        .ok_or_else(|| other("pax extension is too long"))?;
+
+    loop {
+        let next_len = record_content_len
+            .checked_add(record_len.to_string().len())
+            .ok_or_else(|| other("pax extension is too long"))?;
+        if next_len == record_len {
+            break;
+        }
+        record_len = next_len;
+    }
+
+    dst.extend_from_slice(record_len.to_string().as_bytes());
+    dst.push(b' ');
+    dst.extend_from_slice(key);
+    dst.push(b'=');
+    dst.extend_from_slice(value);
+    dst.push(b'\n');
+    Ok(())
+}
+
+fn push_pax_extension(extensions: &mut Vec<PaxExtension>, key: &'static [u8], value: Vec<u8>) {
+    extensions.push(PaxExtension { key, value });
+}
+
+fn push_pax_numeric_extension(extensions: &mut Vec<PaxExtension>, key: &'static [u8], value: u64) {
+    push_pax_extension(extensions, key, value.to_string().into_bytes());
+}
+
+fn prepare_header_path(
+    header: &mut Header,
+    path: &Path,
+    pax_extensions: &mut Vec<PaxExtension>,
+) -> io::Result<()> {
+    clear_header_path(header)?;
+    if header.set_path(path).is_err() {
+        let data = path2pax_bytes(path)?;
+        clear_header_path(header)?;
+        header.set_path(PAX_PAYLOAD_PATH)?;
+        push_pax_extension(pax_extensions, b"path", data);
+    }
+    Ok(())
+}
+
+fn clear_header_path(header: &mut Header) -> io::Result<()> {
+    let ustar = header
+        .as_ustar_mut()
+        .ok_or_else(|| other("cannot append a non-USTAR header"))?;
+    ustar.name.fill(0);
+    ustar.prefix.fill(0);
+    Ok(())
+}
+
+fn prepare_header_link(
+    header: &mut Header,
+    link_name: &Path,
+    pax_extensions: &mut Vec<PaxExtension>,
+) -> io::Result<()> {
+    header.as_old_mut().linkname.fill(0);
+    if header.set_link_name(link_name).is_err() {
+        let data = link_name2pax_bytes(link_name)?;
+        header.as_old_mut().linkname.fill(0);
+        push_pax_extension(pax_extensions, b"linkpath", data);
+    }
+    Ok(())
+}
+
+fn prepare_header_numeric_fields(
+    header: &mut Header,
+    pax_extensions: &mut Vec<PaxExtension>,
+) -> io::Result<()> {
+    fn is_base256(field: &[u8]) -> bool {
+        field.first().is_some_and(|byte| byte & 0x80 != 0)
+    }
+
+    if is_base256(&header.as_old().size) {
+        push_pax_numeric_extension(pax_extensions, b"size", header.entry_size()?);
+        header.set_size(0);
+    }
+
+    if is_base256(&header.as_old().uid) {
+        push_pax_numeric_extension(pax_extensions, b"uid", header.uid()?);
+        header.set_uid(0);
+    }
+
+    if is_base256(&header.as_old().gid) {
+        push_pax_numeric_extension(pax_extensions, b"gid", header.gid()?);
+        header.set_gid(0);
+    }
+
+    if is_base256(&header.as_old().mtime) {
+        push_pax_numeric_extension(pax_extensions, b"mtime", header.mtime()?);
+        header.set_mtime(0);
+    }
+
+    Ok(())
+}
+
 async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -544,17 +736,21 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
         return Err(other(&format!("{} has unknown file type", path.display())));
     }
 
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     header.set_metadata_in_mode(stat, mode);
-    prepare_header_path(dst, &mut header, path).await?;
+    let mut pax_extensions = Vec::new();
+    prepare_header_path(&mut header, path, &mut pax_extensions)?;
 
-    header.set_entry_type(entry_type);
+    header.set_entry_type(entry_type)?;
     let dev_id = stat.rdev();
     let dev_major = ((dev_id >> 32) & 0xffff_f000) | ((dev_id >> 8) & 0x0000_0fff);
     let dev_minor = ((dev_id >> 12) & 0xffff_ff00) | ((dev_id) & 0x0000_00ff);
     header.set_device_major(dev_major as u32)?;
     header.set_device_minor(dev_minor as u32)?;
 
+    prepare_header_numeric_fields(&mut header, &mut pax_extensions)?;
+    validate_header_for_write(&header)?;
+    append_pax_extensions(dst, &pax_extensions).await?;
     header.set_cksum();
     dst.write_all(header.as_bytes()).await?;
 
@@ -583,75 +779,6 @@ async fn append_dir<Dst: Write + Unpin + ?Sized>(
     Ok(())
 }
 
-fn prepare_header(size: u64, entry_type: EntryType) -> Header {
-    let mut header = Header::new_gnu();
-    let name = b"././@LongLink";
-    header.as_gnu_mut().unwrap().name[..name.len()].clone_from_slice(&name[..]);
-    header.set_mode(0o644);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    // + 1 to be compliant with GNU tar
-    header.set_size(size + 1);
-    header.set_entry_type(entry_type);
-    header.set_cksum();
-    header
-}
-
-async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
-    dst: &mut Dst,
-    header: &mut Header,
-    path: &Path,
-) -> io::Result<()> {
-    // Try to encode the path directly in the header, but if it ends up not
-    // working (probably because it's too long) then try to use the GNU-specific
-    // long name extension by emitting an entry which indicates that it's the
-    // filename.
-    if let Err(e) = header.set_path(path) {
-        let data = path2bytes(path)?;
-        let max = header.as_old().name.len();
-        //  Since e isn't specific enough to let us know the path is indeed too
-        //  long, verify it first before using the extension.
-        if data.len() < max {
-            return Err(e);
-        }
-        let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
-        // null-terminated string
-        let mut data2 = data.chain(io::repeat(0).take(1));
-        append(dst, &header2, &mut data2).await?;
-
-        // Truncate the path to store in the header we're about to emit to
-        // ensure we've got something at least mentioned. Note that we use
-        // `str`-encoding to be compatible with Windows, but in general the
-        // entry in the header itself shouldn't matter too much since extraction
-        // doesn't look at it.
-        let truncated = match str::from_utf8(&data[..max]) {
-            Ok(s) => s,
-            Err(e) => str::from_utf8(&data[..e.valid_up_to()]).unwrap(),
-        };
-        header.set_truncated_path_for_gnu_header(truncated)?;
-    }
-    Ok(())
-}
-
-async fn prepare_header_link<Dst: Write + Unpin + ?Sized>(
-    dst: &mut Dst,
-    header: &mut Header,
-    link_name: &Path,
-) -> io::Result<()> {
-    // Same as previous function but for linkname
-    if let Err(e) = header.set_link_name(link_name) {
-        let data = path2bytes(link_name)?;
-        if data.len() < header.as_old().linkname.len() {
-            return Err(e);
-        }
-        let header2 = prepare_header(data.len() as u64, EntryType::GNULongLink);
-        let mut data2 = data.chain(io::repeat(0).take(1));
-        append(dst, &header2, &mut data2).await?;
-    }
-    Ok(())
-}
-
 async fn append_fs<Dst: Write + Unpin + ?Sized, R: Read + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -660,13 +787,17 @@ async fn append_fs<Dst: Write + Unpin + ?Sized, R: Read + Unpin + ?Sized>(
     mode: HeaderMode,
     link_name: Option<&Path>,
 ) -> io::Result<()> {
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
+    let mut pax_extensions = Vec::new();
 
-    prepare_header_path(dst, &mut header, path).await?;
+    prepare_header_path(&mut header, path, &mut pax_extensions)?;
     header.set_metadata_in_mode(meta, mode);
     if let Some(link_name) = link_name {
-        prepare_header_link(dst, &mut header, link_name).await?;
+        prepare_header_link(&mut header, link_name, &mut pax_extensions)?;
     }
+    prepare_header_numeric_fields(&mut header, &mut pax_extensions)?;
+    validate_header_for_write(&header)?;
+    append_pax_extensions(dst, &pax_extensions).await?;
     header.set_cksum();
     append(dst, &header, read).await?;
 

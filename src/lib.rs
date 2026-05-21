@@ -28,9 +28,7 @@ pub use crate::{
     entry::{Entry, Unpacked},
     entry_type::EntryType,
     error::TarError,
-    header::{
-        GnuExtSparseHeader, GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader,
-    },
+    header::{GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader},
     pax::{PaxExtension, PaxExtensions},
 };
 

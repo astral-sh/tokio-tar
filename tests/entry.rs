@@ -22,9 +22,9 @@ macro_rules! t {
 async fn absolute_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("/bar"));
     header.set_cksum();
@@ -49,16 +49,16 @@ async fn absolute_hardlink() {
     let td = t!(Builder::new().prefix("tar").tempdir());
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Link);
+    t!(header.set_entry_type(async_tar::EntryType::Link));
     t!(header.set_path("bar"));
     // This absolute path under tempdir will be created at unpack time
     t!(header.set_link_name(td.path().join("foo")));
@@ -77,16 +77,16 @@ async fn absolute_hardlink() {
 async fn relative_hardlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Link);
+    t!(header.set_entry_type(async_tar::EntryType::Link));
     t!(header.set_path("bar"));
     t!(header.set_link_name("foo"));
     header.set_cksum();
@@ -105,17 +105,17 @@ async fn relative_hardlink() {
 async fn absolute_link_deref_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("/"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo/bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -133,17 +133,17 @@ async fn absolute_link_deref_error() {
 async fn relative_link_deref_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("../../../../"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo/bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -164,9 +164,9 @@ async fn directory_permissions_are_cleared() {
 
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Directory);
+    t!(header.set_entry_type(async_tar::EntryType::Directory));
     t!(header.set_path("foo"));
     header.set_mode(0o777);
     header.set_cksum();
@@ -198,24 +198,24 @@ async fn directory_permissions_are_cleared() {
 async fn modify_link_just_created() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("bar/foo"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo/bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -237,17 +237,17 @@ async fn modify_link_just_created() {
 async fn modify_outside_with_relative_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("symlink"));
     t!(header.set_link_name(".."));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("symlink/foo/bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -265,17 +265,17 @@ async fn modify_outside_with_relative_symlink() {
 async fn parent_paths_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name(".."));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo/bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -295,17 +295,17 @@ async fn good_parent_paths_ok() {
     use std::path::PathBuf;
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path(PathBuf::from("foo").join("bar")));
     t!(header.set_link_name(PathBuf::from("..").join("bar")));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("bar"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
@@ -324,17 +324,17 @@ async fn good_parent_paths_ok() {
 async fn modify_hard_link_just_created() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Link);
+    t!(header.set_entry_type(async_tar::EntryType::Link));
     t!(header.set_path("foo"));
     t!(header.set_link_name("../test"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(1);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo"));
     header.set_cksum();
     t!(ar.append(&header, &b"x"[..]).await);
@@ -359,17 +359,17 @@ async fn modify_hard_link_just_created() {
 async fn modify_symlink_just_created() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("../test"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(1);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("foo"));
     header.set_cksum();
     t!(ar.append(&header, &b"x"[..]).await);
@@ -394,9 +394,9 @@ async fn modify_symlink_just_created() {
 async fn deny_absolute_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("/bar"));
     header.set_cksum();
@@ -415,9 +415,9 @@ async fn deny_absolute_symlink() {
 async fn deny_relative_link() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name("../../../../"));
     header.set_cksum();
@@ -437,17 +437,17 @@ async fn deny_relative_link() {
 async fn accept_relative_link() {
     let mut ar = async_tar::Builder::new(Vec::new());
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo/bar"));
     t!(header.set_link_name("../baz"));
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(1);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("baz"));
     header.set_cksum();
     t!(ar.append(&header, &b"x"[..]).await);
@@ -469,8 +469,8 @@ async fn malformed_pax_path_extension() {
     let mut ar_bytes = Vec::new();
 
     // First, create a PAX extension header with malformed content
-    let mut pax_header = async_tar::Header::new_gnu();
-    pax_header.set_entry_type(async_tar::EntryType::new(b'x')); // PAX local extensions
+    let mut pax_header = async_tar::Header::new_ustar();
+    t!(pax_header.set_entry_type(async_tar::EntryType::new(b'x'))); // PAX local extensions
     t!(pax_header.set_path("PaxHeaders/file"));
 
     // Create malformed PAX extension data - the length field doesn't match the actual content length
@@ -487,9 +487,9 @@ async fn malformed_pax_path_extension() {
     ar_bytes.extend_from_slice(&vec![0u8; padding]);
 
     // Now add the actual file entry
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(4);
-    header.set_entry_type(async_tar::EntryType::Regular);
+    t!(header.set_entry_type(async_tar::EntryType::Regular));
     t!(header.set_path("file"));
     header.set_cksum();
     ar_bytes.extend_from_slice(header.as_bytes());
@@ -544,18 +544,18 @@ async fn symlink_dir_collision_does_not_chmod_external_dir() {
 
     // Add the entries to the archive: one symlink to the target, followed by
     // another entry of the same name that sets the target to 0777.
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Symlink);
+    t!(header.set_entry_type(async_tar::EntryType::Symlink));
     t!(header.set_path("foo"));
     t!(header.set_link_name(&target));
     header.set_mode(0o777);
     header.set_cksum();
     t!(ar.append(&header, &[][..]).await);
 
-    let mut header = async_tar::Header::new_gnu();
+    let mut header = async_tar::Header::new_ustar();
     header.set_size(0);
-    header.set_entry_type(async_tar::EntryType::Directory);
+    t!(header.set_entry_type(async_tar::EntryType::Directory));
     t!(header.set_path("foo"));
     header.set_mode(0o777);
     header.set_cksum();
