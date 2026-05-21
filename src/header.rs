@@ -1348,8 +1348,7 @@ fn copy_into(slot: &mut [u8], bytes: &[u8]) -> io::Result<()> {
 fn copy_path_into_inner(mut slot: &mut [u8], path: &Path, is_link_name: bool) -> io::Result<()> {
     let mut emitted = false;
     let mut needs_slash = false;
-    let mut iter = path.components();
-    while let Some(component) = iter.next() {
+    for component in path.components() {
         let bytes = path2bytes(Path::new(component.as_os_str()))?;
         match (component, is_link_name) {
             (Component::Prefix(..), false) | (Component::RootDir, false) => {

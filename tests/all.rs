@@ -118,8 +118,8 @@ async fn pax_records<R: AsyncRead + Unpin>(
     entry: &mut async_tar::Entry<R>,
 ) -> Vec<(String, String)> {
     let mut records = Vec::new();
-    let mut extensions = t!(entry.pax_extensions().await).unwrap();
-    while let Some(extension) = extensions.next() {
+    let extensions = t!(entry.pax_extensions().await).unwrap();
+    for extension in extensions {
         let extension = t!(extension);
         records.push((
             t!(extension.key()).to_owned(),
