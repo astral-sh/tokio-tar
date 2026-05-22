@@ -39,22 +39,6 @@ pub enum EntryType {
 }
 
 impl EntryType {
-    pub(crate) fn is_ustar_or_pax_writer(self) -> bool {
-        matches!(
-            self,
-            EntryType::Regular
-                | EntryType::Link
-                | EntryType::Symlink
-                | EntryType::Char
-                | EntryType::Block
-                | EntryType::Directory
-                | EntryType::Fifo
-                | EntryType::Continuous
-                | EntryType::XGlobalHeader
-                | EntryType::XHeader
-        )
-    }
-
     /// Creates a new entry type from a raw byte.
     ///
     /// Note that the other named constructors of entry type may be more

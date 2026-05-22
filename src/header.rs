@@ -10,12 +10,12 @@ use std::{
     iter,
     iter::{once, repeat},
     mem,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str,
 };
 use tokio::io;
 
-use crate::{other, EntryType, LinkTarget, Name};
+use crate::{other, EntryType};
 
 /// A deterministic, arbitrary, non-zero timestamp that use used as `mtime`
 /// of headers when [`HeaderMode::Deterministic`] is used.
@@ -137,13 +137,31 @@ pub struct GnuSparseHeader {
 /// the next entry will be one of these headers.
 #[repr(C)]
 #[allow(missing_docs)]
-pub(crate) struct GnuExtSparseHeader {
+pub struct GnuExtSparseHeader {
     pub sparse: [GnuSparseHeader; 21],
     pub isextended: [u8; 1],
     pub padding: [u8; 7],
 }
 
 impl Header {
+    /// Creates a new blank GNU header.
+    ///
+    /// The GNU style header is the default for this library and allows various
+    /// extensions such as long path names, long link names, and setting the
+    /// atime/ctime metadata attributes of files.
+    pub fn new_gnu() -> Header {
+        let mut header = Header {
+            bytes: [0; BLOCK_SIZE as usize],
+        };
+        unsafe {
+            let gnu = cast_mut::<_, GnuHeader>(&mut header);
+            gnu.magic = *b"ustar ";
+            gnu.version = *b" \0";
+        }
+        header.set_mtime(0);
+        header
+    }
+
     /// Creates a new blank UStar header.
     ///
     /// The UStar style header is an extension of the original archive header
@@ -151,20 +169,26 @@ impl Header {
     /// too long) path name.
     ///
     /// UStar is also the basis used for pax archives.
-    pub(crate) fn new_ustar() -> Header {
+    pub fn new_ustar() -> Header {
         let mut header = Header {
             bytes: [0; BLOCK_SIZE as usize],
         };
         unsafe {
-            let ustar = cast_mut::<_, UstarHeader>(&mut header);
-            ustar.magic = *b"ustar\0";
-            ustar.version = *b"00";
+            let gnu = cast_mut::<_, UstarHeader>(&mut header);
+            gnu.magic = *b"ustar\0";
+            gnu.version = *b"00";
         }
         header.set_mtime(0);
         header
     }
 
-    pub(crate) fn new_old() -> Header {
+    /// Creates a new blank old header.
+    ///
+    /// This header format is the original archive header format which all other
+    /// versions are compatible with (e.g. they are a superset). This header
+    /// format limits the path name limit and isn't able to contain extra
+    /// metadata like atime/ctime.
+    pub fn new_old() -> Header {
         let mut header = Header {
             bytes: [0; BLOCK_SIZE as usize],
         };
@@ -190,7 +214,8 @@ impl Header {
         unsafe { cast(self) }
     }
 
-    pub(crate) fn as_old_mut(&mut self) -> &mut OldHeader {
+    /// Same as `as_old`, but the mutable version.
+    pub fn as_old_mut(&mut self) -> &mut OldHeader {
         unsafe { cast_mut(self) }
     }
 
@@ -211,7 +236,8 @@ impl Header {
         }
     }
 
-    pub(crate) fn as_ustar_mut(&mut self) -> Option<&mut UstarHeader> {
+    /// Same as `as_ustar_mut`, but the mutable version.
+    pub fn as_ustar_mut(&mut self) -> Option<&mut UstarHeader> {
         if self.is_ustar() {
             Some(unsafe { cast_mut(self) })
         } else {
@@ -236,6 +262,15 @@ impl Header {
         }
     }
 
+    /// Same as `as_gnu`, but the mutable version.
+    pub fn as_gnu_mut(&mut self) -> Option<&mut GnuHeader> {
+        if self.is_gnu() {
+            Some(unsafe { cast_mut(self) })
+        } else {
+            None
+        }
+    }
+
     /// Treats the given byte slice as a header.
     ///
     /// Panics if the length of the passed slice is not equal to 512.
@@ -250,7 +285,8 @@ impl Header {
         &self.bytes
     }
 
-    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8; BLOCK_SIZE as usize] {
+    /// Returns a view into this header as a byte array.
+    pub fn as_mut_bytes(&mut self) -> &mut [u8; BLOCK_SIZE as usize] {
         &mut self.bytes
     }
 
@@ -260,9 +296,13 @@ impl Header {
     /// This is useful for initializing a `Header` from the OS's metadata from a
     /// file. By default, this will use `HeaderMode::Complete` to include all
     /// metadata.
+    pub fn set_metadata(&mut self, meta: &Metadata) {
+        self.fill_from(meta, HeaderMode::Complete);
+    }
+
     /// Sets only the metadata relevant to the given HeaderMode in this header
     /// from the metadata argument provided.
-    pub(crate) fn set_metadata_in_mode(&mut self, meta: &Metadata, mode: HeaderMode) {
+    pub fn set_metadata_in_mode(&mut self, meta: &Metadata, mode: HeaderMode) {
         self.fill_from(meta, mode);
     }
 
@@ -297,7 +337,7 @@ impl Header {
     }
 
     /// Encodes the `size` argument into the size field of this header.
-    pub(crate) fn set_size(&mut self, size: u64) {
+    pub fn set_size(&mut self, size: u64) {
         num_field_wrapper_into(&mut self.as_old_mut().size, size);
     }
 
@@ -333,23 +373,40 @@ impl Header {
         String::from_utf8_lossy(&self.path_bytes()).to_string()
     }
 
-    /// Sets the path name for this header from a validated archive member name.
+    /// Sets the path name for this header.
     ///
-    /// This bare-header setter accepts only ASCII names directly representable
-    /// in USTAR. Use [`crate::Builder`] named methods when a valid name needs a
-    /// PAX `path` extension, such as a non-ASCII or overlong name.
+    /// This function will set the pathname listed in this header, encoding it
+    /// in the appropriate format. May fail if the path is too long or if the
+    /// path specified is not Unicode and this is a Windows platform. Will
+    /// strip out any "." path component, which signifies the current directory.
     ///
-    pub(crate) fn set_path(&mut self, name: &Name) -> io::Result<()> {
-        if !name.as_str().is_ascii() {
-            return Err(pax_required("path"));
-        }
+    /// Note: This function does not support names over 100 bytes, or paths
+    /// over 255 bytes, even for formats that support longer names. Instead,
+    /// use `Builder` methods to insert a long-name extension at the same time
+    /// as the file content.
+    pub fn set_path<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
+        self.set_path_inner(p.as_ref(), false)
+    }
+
+    fn set_path_inner(
+        &mut self,
+        path: &Path,
+        is_truncated_gnu_long_path: bool,
+    ) -> std::io::Result<()> {
         if let Some(ustar) = self.as_ustar_mut() {
-            return ustar
-                .set_path(name)
-                .then_some(())
-                .ok_or_else(|| pax_required("path"));
+            return ustar.set_path(path);
         }
-        Err(other("cannot set path on a non-USTAR header"))
+        if is_truncated_gnu_long_path {
+            copy_path_into_gnu_long(&mut self.as_old_mut().name, path, false)
+        } else {
+            copy_path_into(&mut self.as_old_mut().name, path, false)
+        }
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{} when setting path for {}", err, self.path_lossy()),
+            )
+        })
     }
 
     /// Returns the link name stored in this header, if any is found.
@@ -383,48 +440,23 @@ impl Header {
         }
     }
 
-    /// Sets a hard-link destination for this header.
+    /// Sets the link name for this header.
     ///
-    /// This bare-header setter accepts only ASCII [`Name`] values fitting in
-    /// the USTAR `linkname` field. Use [`crate::Builder::append_hard_link`] for
-    /// a value requiring a PAX `linkpath` extension.
-    pub(crate) fn set_hard_link_name(&mut self, name: &Name) -> io::Result<()> {
-        if !name.as_str().is_ascii() {
-            return Err(pax_required("linkpath"));
-        }
-        if self.as_ustar().is_none() {
-            return Err(other("cannot set link name on a non-USTAR header"));
-        }
-        self.set_link_name_bytes(name.as_bytes())
-            .then_some(())
-            .ok_or_else(|| pax_required("linkpath"))
+    /// This function will set the linkname listed in this header, encoding it
+    /// in the appropriate format. May fail if the link name is too long or if
+    /// the path specified is not Unicode and this is a Windows platform. Will
+    /// strip out any "." path component, which signifies the current directory.
+    pub fn set_link_name<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
+        self._set_link_name(p.as_ref())
     }
 
-    /// Sets a symbolic-link target for this header.
-    ///
-    /// This bare-header setter accepts only ASCII [`LinkTarget`] values fitting
-    /// in the USTAR `linkname` field. Use [`crate::Builder::append_symlink`]
-    /// for a value requiring a PAX `linkpath` extension.
-    pub(crate) fn set_symlink_target(&mut self, target: &LinkTarget) -> io::Result<()> {
-        if !target.as_str().is_ascii() {
-            return Err(pax_required("linkpath"));
-        }
-        if self.as_ustar().is_none() {
-            return Err(other("cannot set link name on a non-USTAR header"));
-        }
-        self.set_link_name_bytes(target.as_bytes())
-            .then_some(())
-            .ok_or_else(|| pax_required("linkpath"))
-    }
-
-    fn set_link_name_bytes(&mut self, value: &[u8]) -> bool {
-        let linkname = &mut self.as_old_mut().linkname;
-        if value.len() > linkname.len() {
-            return false;
-        }
-        linkname.fill(0);
-        linkname[..value.len()].copy_from_slice(value);
-        true
+    fn _set_link_name(&mut self, path: &Path) -> io::Result<()> {
+        copy_path_into(&mut self.as_old_mut().linkname, path, true).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{} when setting link name for {}", err, self.path_lossy()),
+            )
+        })
     }
 
     /// Returns the mode bits for this file
@@ -442,7 +474,7 @@ impl Header {
     }
 
     /// Encodes the `mode` provided into this header.
-    pub(crate) fn set_mode(&mut self, mode: u32) {
+    pub fn set_mode(&mut self, mode: u32) {
         octal_into(&mut self.as_old_mut().mode, mode);
     }
 
@@ -459,7 +491,7 @@ impl Header {
     }
 
     /// Encodes the `uid` provided into this header.
-    pub(crate) fn set_uid(&mut self, uid: u64) {
+    pub fn set_uid(&mut self, uid: u64) {
         num_field_wrapper_into(&mut self.as_old_mut().uid, uid);
     }
 
@@ -474,7 +506,7 @@ impl Header {
     }
 
     /// Encodes the `gid` provided into this header.
-    pub(crate) fn set_gid(&mut self, gid: u64) {
+    pub fn set_gid(&mut self, gid: u64) {
         num_field_wrapper_into(&mut self.as_old_mut().gid, gid);
     }
 
@@ -492,7 +524,7 @@ impl Header {
     ///
     /// Note that this time is typically a number of seconds passed since
     /// January 1, 1970.
-    pub(crate) fn set_mtime(&mut self, mtime: u64) {
+    pub fn set_mtime(&mut self, mtime: u64) {
         num_field_wrapper_into(&mut self.as_old_mut().mtime, mtime);
     }
 
@@ -524,6 +556,21 @@ impl Header {
         }
     }
 
+    /// Sets the username inside this header.
+    ///
+    /// This function will return an error if this header format cannot encode a
+    /// user name or the name is too long.
+    pub fn set_username(&mut self, name: &str) -> io::Result<()> {
+        if let Some(ustar) = self.as_ustar_mut() {
+            return ustar.set_username(name);
+        }
+        if let Some(gnu) = self.as_gnu_mut() {
+            gnu.set_username(name)
+        } else {
+            Err(other("not a ustar or gnu archive, cannot set username"))
+        }
+    }
+
     /// Return the group name of the owner of this file.
     ///
     /// A return value of `Ok(Some(..))` indicates that the group name was
@@ -552,6 +599,21 @@ impl Header {
         }
     }
 
+    /// Sets the group name inside this header.
+    ///
+    /// This function will return an error if this header format cannot encode a
+    /// group name or the name is too long.
+    pub fn set_groupname(&mut self, name: &str) -> io::Result<()> {
+        if let Some(ustar) = self.as_ustar_mut() {
+            return ustar.set_groupname(name);
+        }
+        if let Some(gnu) = self.as_gnu_mut() {
+            gnu.set_groupname(name)
+        } else {
+            Err(other("not a ustar or gnu archive, cannot set groupname"))
+        }
+    }
+
     /// Returns the device major number, if present.
     ///
     /// This field may not be present in all archives, and it may not be
@@ -573,12 +635,15 @@ impl Header {
     ///
     /// This function will return an error if this header format cannot encode a
     /// major device number.
-    pub(crate) fn set_device_major(&mut self, major: u32) -> io::Result<()> {
+    pub fn set_device_major(&mut self, major: u32) -> io::Result<()> {
         if let Some(ustar) = self.as_ustar_mut() {
             ustar.set_device_major(major);
             Ok(())
+        } else if let Some(gnu) = self.as_gnu_mut() {
+            gnu.set_device_major(major);
+            Ok(())
         } else {
-            Err(other("cannot set dev_major on a non-USTAR header"))
+            Err(other("not a ustar or gnu archive, cannot set dev_major"))
         }
     }
 
@@ -603,12 +668,15 @@ impl Header {
     ///
     /// This function will return an error if this header format cannot encode a
     /// minor device number.
-    pub(crate) fn set_device_minor(&mut self, minor: u32) -> io::Result<()> {
+    pub fn set_device_minor(&mut self, minor: u32) -> io::Result<()> {
         if let Some(ustar) = self.as_ustar_mut() {
             ustar.set_device_minor(minor);
             Ok(())
+        } else if let Some(gnu) = self.as_gnu_mut() {
+            gnu.set_device_minor(minor);
+            Ok(())
         } else {
-            Err(other("cannot set dev_minor on a non-USTAR header"))
+            Err(other("not a ustar or gnu archive, cannot set dev_minor"))
         }
     }
 
@@ -618,21 +686,7 @@ impl Header {
     }
 
     /// Sets the type of file that will be described by this header.
-    ///
-    /// GNU extension entry types cannot be written directly. The builder uses
-    /// PAX extension entries when a USTAR header cannot represent an entry.
-    pub(crate) fn set_entry_type(&mut self, ty: EntryType) -> io::Result<()> {
-        if self.as_ustar().is_none() {
-            return Err(other("cannot set entry type on a non-USTAR header"));
-        }
-        if !ty.is_ustar_or_pax_writer() {
-            return Err(other("cannot set a GNU or unknown entry type"));
-        }
-        self.set_entry_type_unchecked(ty);
-        Ok(())
-    }
-
-    pub(crate) fn set_entry_type_unchecked(&mut self, ty: EntryType) {
+    pub fn set_entry_type(&mut self, ty: EntryType) {
         self.as_old_mut().linkflag = [ty.as_byte()];
     }
 
@@ -652,7 +706,7 @@ impl Header {
 
     /// Sets the checksum field of this header based on the current fields in
     /// this header.
-    pub(crate) fn set_cksum(&mut self) {
+    pub fn set_cksum(&mut self) {
         let cksum = self.calculate_cksum();
         octal_into(&mut self.as_old_mut().cksum, cksum);
     }
@@ -681,6 +735,10 @@ impl Header {
         if let Some(ustar) = self.as_ustar_mut() {
             ustar.set_device_major(0);
             ustar.set_device_minor(0);
+        }
+        if let Some(gnu) = self.as_gnu_mut() {
+            gnu.set_device_major(0);
+            gnu.set_device_minor(0);
         }
     }
 
@@ -729,7 +787,7 @@ impl Header {
         // [1]: https://github.com/alexcrichton/tar-rs/issues/70
 
         // TODO: need to bind more file types
-        self.set_entry_type_unchecked(entry_type(meta.mode()));
+        self.set_entry_type(entry_type(meta.mode()));
 
         fn entry_type(mode: u32) -> EntryType {
             match mode as libc::mode_t & libc::S_IFMT {
@@ -779,7 +837,7 @@ impl Header {
         }
 
         let ft = meta.file_type();
-        self.set_entry_type_unchecked(if ft.is_dir() {
+        self.set_entry_type(if ft.is_dir() {
             EntryType::dir()
         } else if ft.is_file() {
             EntryType::file()
@@ -877,6 +935,11 @@ impl OldHeader {
     pub fn as_header(&self) -> &Header {
         unsafe { cast(self) }
     }
+
+    /// Views this as a normal `Header`
+    pub fn as_header_mut(&mut self) -> &mut Header {
+        unsafe { cast_mut(self) }
+    }
 }
 
 impl fmt::Debug for OldHeader {
@@ -909,29 +972,62 @@ impl UstarHeader {
         String::from_utf8_lossy(&self.path_bytes()).to_string()
     }
 
-    fn set_path(&mut self, name: &Name) -> bool {
-        let bytes = name.as_bytes();
-        let (prefix, suffix) = if bytes.len() <= self.name.len() {
-            (&[][..], bytes)
-        } else {
-            let Some(split) = bytes.iter().enumerate().rev().find_map(|(index, byte)| {
-                let suffix = &bytes[index + 1..];
-                (*byte == b'/'
-                    && index <= self.prefix.len()
-                    && !suffix.is_empty()
-                    && suffix.len() <= self.name.len())
-                .then_some(index)
-            }) else {
-                return false;
-            };
-            (&bytes[..split], &bytes[split + 1..])
-        };
+    /// See `Header::set_path`
+    pub fn set_path<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
+        self._set_path(p.as_ref())
+    }
 
-        self.name.fill(0);
-        self.prefix.fill(0);
-        self.name[..suffix.len()].copy_from_slice(suffix);
-        self.prefix[..prefix.len()].copy_from_slice(prefix);
-        true
+    fn _set_path(&mut self, path: &Path) -> io::Result<()> {
+        // This can probably be optimized quite a bit more, but for now just do
+        // something that's relatively easy and readable.
+        //
+        // First up, if the path fits within `self.name` then we just shove it
+        // in there. If not then we try to split it between some existing path
+        // components where it can fit in name/prefix. To do that we peel off
+        // enough until the path fits in `prefix`, then we try to put both
+        // halves into their destination.
+        let bytes = path2bytes(path)?;
+        let (maxnamelen, maxprefixlen) = (self.name.len(), self.prefix.len());
+        if bytes.len() <= maxnamelen {
+            copy_path_into(&mut self.name, path, false).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("{} when setting path for {}", err, self.path_lossy()),
+                )
+            })?;
+        } else {
+            let mut prefix = path;
+            let mut prefixlen;
+            loop {
+                match prefix.parent() {
+                    Some(parent) => prefix = parent,
+                    None => {
+                        return Err(other(&format!(
+                            "path cannot be split to be inserted into archive: {}",
+                            path.display()
+                        )));
+                    }
+                }
+                prefixlen = path2bytes(prefix)?.len();
+                if prefixlen <= maxprefixlen {
+                    break;
+                }
+            }
+            copy_path_into(&mut self.prefix, prefix, false).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("{} when setting path for {}", err, self.path_lossy()),
+                )
+            })?;
+            let path = bytes2path(Cow::Borrowed(&bytes[prefixlen + 1..]))?;
+            copy_path_into(&mut self.name, &path, false).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("{} when setting path for {}", err, self.path_lossy()),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// See `Header::username_bytes`
@@ -939,9 +1035,29 @@ impl UstarHeader {
         truncate(&self.uname)
     }
 
+    /// See `Header::set_username`
+    pub fn set_username(&mut self, name: &str) -> io::Result<()> {
+        copy_into(&mut self.uname, name.as_bytes()).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{} when setting username for {}", err, self.path_lossy()),
+            )
+        })
+    }
+
     /// See `Header::groupname_bytes`
     pub fn groupname_bytes(&self) -> &[u8] {
         truncate(&self.gname)
+    }
+
+    /// See `Header::set_groupname`
+    pub fn set_groupname(&mut self, name: &str) -> io::Result<()> {
+        copy_into(&mut self.gname, name.as_bytes()).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{} when setting groupname for {}", err, self.path_lossy()),
+            )
+        })
     }
 
     /// See `Header::device_major`
@@ -960,7 +1076,8 @@ impl UstarHeader {
             })
     }
 
-    fn set_device_major(&mut self, major: u32) {
+    /// See `Header::set_device_major`
+    pub fn set_device_major(&mut self, major: u32) {
         octal_into(&mut self.dev_major, major);
     }
 
@@ -980,13 +1097,19 @@ impl UstarHeader {
             })
     }
 
-    fn set_device_minor(&mut self, minor: u32) {
+    /// See `Header::set_device_minor`
+    pub fn set_device_minor(&mut self, minor: u32) {
         octal_into(&mut self.dev_minor, minor);
     }
 
     /// Views this as a normal `Header`
     pub fn as_header(&self) -> &Header {
         unsafe { cast(self) }
+    }
+
+    /// Views this as a normal `Header`
+    pub fn as_header_mut(&mut self) -> &mut Header {
+        unsafe { cast_mut(self) }
     }
 }
 
@@ -1013,9 +1136,37 @@ impl GnuHeader {
         )
     }
 
+    /// See `Header::set_username`
+    pub fn set_username(&mut self, name: &str) -> io::Result<()> {
+        copy_into(&mut self.uname, name.as_bytes()).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "{} when setting username for {}",
+                    err,
+                    self.fullname_lossy()
+                ),
+            )
+        })
+    }
+
     /// See `Header::groupname_bytes`
     pub fn groupname_bytes(&self) -> &[u8] {
         truncate(&self.gname)
+    }
+
+    /// See `Header::set_groupname`
+    pub fn set_groupname(&mut self, name: &str) -> io::Result<()> {
+        copy_into(&mut self.gname, name.as_bytes()).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "{} when setting groupname for {}",
+                    err,
+                    self.fullname_lossy()
+                ),
+            )
+        })
     }
 
     /// See `Header::device_major`
@@ -1034,6 +1185,11 @@ impl GnuHeader {
             })
     }
 
+    /// See `Header::set_device_major`
+    pub fn set_device_major(&mut self, major: u32) {
+        octal_into(&mut self.dev_major, major);
+    }
+
     /// See `Header::device_minor`
     pub fn device_minor(&self) -> io::Result<u32> {
         octal_from(&self.dev_minor)
@@ -1050,6 +1206,11 @@ impl GnuHeader {
             })
     }
 
+    /// See `Header::set_device_minor`
+    pub fn set_device_minor(&mut self, minor: u32) {
+        octal_into(&mut self.dev_minor, minor);
+    }
+
     /// Returns the last modification time in Unix time format
     pub fn atime(&self) -> io::Result<u64> {
         num_field_wrapper_from(&self.atime).map_err(|err| {
@@ -1060,6 +1221,14 @@ impl GnuHeader {
         })
     }
 
+    /// Encodes the `atime` provided into this header.
+    ///
+    /// Note that this time is typically a number of seconds passed since
+    /// January 1, 1970.
+    pub fn set_atime(&mut self, atime: u64) {
+        num_field_wrapper_into(&mut self.atime, atime);
+    }
+
     /// Returns the last modification time in Unix time format
     pub fn ctime(&self) -> io::Result<u64> {
         num_field_wrapper_from(&self.ctime).map_err(|err| {
@@ -1068,6 +1237,14 @@ impl GnuHeader {
                 format!("{} when getting ctime for {}", err, self.fullname_lossy()),
             )
         })
+    }
+
+    /// Encodes the `ctime` provided into this header.
+    ///
+    /// Note that this time is typically a number of seconds passed since
+    /// January 1, 1970.
+    pub fn set_ctime(&mut self, ctime: u64) {
+        num_field_wrapper_into(&mut self.ctime, ctime);
     }
 
     /// Returns the "real size" of the file this header represents.
@@ -1099,6 +1276,11 @@ impl GnuHeader {
     /// Views this as a normal `Header`
     pub fn as_header(&self) -> &Header {
         unsafe { cast(self) }
+    }
+
+    /// Views this as a normal `Header`
+    pub fn as_header_mut(&mut self) -> &mut Header {
+        unsafe { cast_mut(self) }
     }
 }
 
@@ -1177,18 +1359,40 @@ impl fmt::Debug for GnuSparseHeader {
 }
 
 impl GnuExtSparseHeader {
-    pub(crate) fn new() -> GnuExtSparseHeader {
+    /// Crates a new zero'd out sparse header entry.
+    pub fn new() -> GnuExtSparseHeader {
         unsafe { mem::zeroed() }
     }
 
-    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8; BLOCK_SIZE as usize] {
+    /// Returns a view into this header as a byte array.
+    pub fn as_bytes(&self) -> &[u8; BLOCK_SIZE as usize] {
+        debug_assert_eq!(mem::size_of_val(self), BLOCK_SIZE as usize);
+        unsafe { &*(self as *const GnuExtSparseHeader as *const [u8; BLOCK_SIZE as usize]) }
+    }
+
+    /// Returns a view into this header as a byte array.
+    pub fn as_mut_bytes(&mut self) -> &mut [u8; BLOCK_SIZE as usize] {
         debug_assert_eq!(mem::size_of_val(self), BLOCK_SIZE as usize);
         unsafe { &mut *(self as *mut GnuExtSparseHeader as *mut [u8; BLOCK_SIZE as usize]) }
+    }
+
+    /// Returns a slice of the underlying sparse headers.
+    ///
+    /// Some headers may represent empty chunks of both the offset and numbytes
+    /// fields are 0.
+    pub fn sparse(&self) -> &[GnuSparseHeader; 21] {
+        &self.sparse
     }
 
     /// Indicates if another sparse header should be following this one.
     pub fn is_extended(&self) -> bool {
         self.isextended[0] == 1
+    }
+}
+
+impl Default for GnuExtSparseHeader {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1276,10 +1480,147 @@ fn truncate(slice: &[u8]) -> &[u8] {
     }
 }
 
-fn pax_required(field: &str) -> io::Error {
-    other(&format!(
-        "{field} requires a PAX extension; use Builder named methods when writing this entry"
-    ))
+/// Copies `bytes` into the `slot` provided, returning an error if the `bytes`
+/// array is too long or if it contains any nul bytes.
+fn copy_into(slot: &mut [u8], bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > slot.len() {
+        Err(other("provided value is too long"))
+    } else if bytes.contains(&0) {
+        Err(other("provided value contains a nul byte"))
+    } else {
+        for (slot, val) in slot.iter_mut().zip(bytes.iter().chain(Some(&0))) {
+            *slot = *val;
+        }
+        Ok(())
+    }
+}
+
+fn copy_path_into_inner(
+    mut slot: &mut [u8],
+    path: &Path,
+    is_link_name: bool,
+    is_truncated_gnu_long_path: bool,
+) -> io::Result<()> {
+    let mut emitted = false;
+    let mut needs_slash = false;
+    let mut iter = path.components().peekable();
+    while let Some(component) = iter.next() {
+        let bytes = path2bytes(Path::new(component.as_os_str()))?;
+        match (component, is_link_name) {
+            (Component::Prefix(..), false) | (Component::RootDir, false) => {
+                return Err(other("paths in archives must be relative"));
+            }
+            (Component::ParentDir, false) => {
+                // If it's last component of a gnu long path we know that there might be more
+                // to the component than .. (the rest is stored elsewhere)
+                // Otherwise it's a clear error
+                if !is_truncated_gnu_long_path || iter.peek().is_some() {
+                    return Err(other("paths in archives must not have `..`"));
+                }
+            }
+            // Allow "./" as the path
+            (Component::CurDir, false) if path.components().count() == 1 => {}
+            (Component::CurDir, false) => continue,
+            (Component::Normal(_), _) | (_, true) => {}
+        };
+        if needs_slash {
+            copy(&mut slot, b"/")?;
+        }
+        if bytes.contains(&b'/') {
+            if let Component::Normal(..) = component {
+                return Err(other("path component in archive cannot contain `/`"));
+            }
+        }
+        copy(&mut slot, &bytes)?;
+        if &*bytes != b"/" {
+            needs_slash = true;
+        }
+        emitted = true;
+    }
+    if !emitted {
+        return Err(other("paths in archives must have at least one component"));
+    }
+    if ends_with_slash(path) {
+        copy(&mut slot, b"/")?;
+    }
+    return Ok(());
+
+    fn copy(slot: &mut &mut [u8], bytes: &[u8]) -> io::Result<()> {
+        copy_into(slot, bytes)?;
+        let tmp = std::mem::take(slot);
+        *slot = &mut tmp[bytes.len()..];
+        Ok(())
+    }
+}
+
+/// Copies `path` into the `slot` provided
+///
+/// Returns an error if:
+///
+/// * the path is too long to fit
+/// * a nul byte was found
+/// * an invalid path component is encountered (e.g. a root path or parent dir)
+/// * the path itself is empty
+fn copy_path_into(slot: &mut [u8], path: &Path, is_link_name: bool) -> io::Result<()> {
+    copy_path_into_inner(slot, path, is_link_name, false)
+}
+
+/// Copies `path` into the `slot` provided
+///
+/// Returns an error if:
+///
+/// * the path is too long to fit
+/// * a nul byte was found
+/// * an invalid path component is encountered (e.g. a root path or parent dir)
+/// * the path itself is empty
+///
+/// This is less restrictive version meant to be used for truncated GNU paths.
+fn copy_path_into_gnu_long(slot: &mut [u8], path: &Path, is_link_name: bool) -> io::Result<()> {
+    copy_path_into_inner(slot, path, is_link_name, true)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn ends_with_slash(p: &Path) -> bool {
+    p.to_string_lossy().ends_with('/')
+}
+
+#[cfg(windows)]
+fn ends_with_slash(p: &Path) -> bool {
+    let last = p.as_os_str().encode_wide().last();
+    last == Some(b'/' as u16) || last == Some(b'\\' as u16)
+}
+
+#[cfg(unix)]
+fn ends_with_slash(p: &Path) -> bool {
+    p.as_os_str().as_bytes().ends_with(b"/")
+}
+
+#[cfg(any(windows, target_arch = "wasm32"))]
+pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
+    p.as_os_str()
+        .to_str()
+        .map(|s| s.as_bytes())
+        .ok_or_else(|| other(&format!("path {} was not valid Unicode", p.display())))
+        .map(|bytes| {
+            if bytes.contains(&b'\\') {
+                // Normalize to Unix-style path separators
+                let mut bytes = bytes.to_owned();
+                for b in &mut bytes {
+                    if *b == b'\\' {
+                        *b = b'/';
+                    }
+                }
+                Cow::Owned(bytes)
+            } else {
+                Cow::Borrowed(bytes)
+            }
+        })
+}
+
+#[cfg(unix)]
+/// On unix this will never fail
+pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
+    Ok(Cow::Borrowed(p.as_os_str().as_bytes()))
 }
 
 #[cfg(windows)]

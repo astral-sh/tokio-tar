@@ -15,7 +15,7 @@ use tokio::{
 };
 use tokio_stream::*;
 
-use async_tar::{Archive, ArchiveBuilder, Builder, EntryMetadata, Header, OldHeader, UstarHeader};
+use async_tar::{Archive, ArchiveBuilder, Builder, EntryMetadata, EntryType, Header};
 use filetime::FileTime;
 use tempfile::{Builder as TempBuilder, TempDir};
 
@@ -34,75 +34,23 @@ macro_rules! tar {
     };
 }
 
-fn old_header() -> OldHeader {
-    let mut header: OldHeader = unsafe { std::mem::zeroed() };
-    header.mtime = *b"00000000000\0";
+fn raw_header(mut header: Header, path: &[u8], entry_type: u8, size: u64) -> Header {
+    header.as_old_mut().name[..path.len()].copy_from_slice(path);
+    header.set_entry_type(EntryType::new(entry_type));
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_size(size);
+    header.set_cksum();
     header
 }
 
-fn raw_old_header(path: &[u8], entry_type: u8, size: u64) -> OldHeader {
-    let mut header = old_header();
-    header.name[..path.len()].copy_from_slice(path);
-    header.linkflag = [entry_type];
-    encode_octal(&mut header.mode, 0o644);
-    encode_octal(&mut header.uid, 0);
-    encode_octal(&mut header.gid, 0);
-    encode_numeric(&mut header.size, size);
-    encode_octal(&mut header.mtime, 0);
-    let cksum = raw_header_checksum(header.as_header());
-    encode_octal(&mut header.cksum, cksum as u64);
-    header
+fn raw_old_header(path: &[u8], entry_type: u8, size: u64) -> Header {
+    raw_header(Header::new_old(), path, entry_type, size)
 }
 
-fn raw_ustar_header(path: &[u8], entry_type: u8, size: u64) -> UstarHeader {
-    let mut header: UstarHeader = unsafe { std::mem::zeroed() };
-    header.name[..path.len()].copy_from_slice(path);
-    header.typeflag = [entry_type];
-    header.magic = *b"ustar\0";
-    header.version = *b"00";
-    encode_octal(&mut header.mode, 0o644);
-    encode_octal(&mut header.uid, 0);
-    encode_octal(&mut header.gid, 0);
-    encode_numeric(&mut header.size, size);
-    encode_octal(&mut header.mtime, 0);
-    let cksum = raw_header_checksum(header.as_header());
-    encode_octal(&mut header.cksum, cksum as u64);
-    header
-}
-
-fn encode_octal(dst: &mut [u8], value: u64) {
-    let octal = format!("{value:o}");
-    let value = std::iter::once(b'\0').chain(octal.bytes().rev().chain(std::iter::repeat(b'0')));
-    for (slot, value) in dst.iter_mut().rev().zip(value) {
-        *slot = value;
-    }
-}
-
-fn encode_numeric(dst: &mut [u8], value: u64) {
-    if value < 8_589_934_592 {
-        encode_octal(dst, value);
-        return;
-    }
-
-    dst.fill(0);
-    let offset = dst.len() - std::mem::size_of::<u64>();
-    dst[offset..].copy_from_slice(&value.to_be_bytes());
-    dst[0] |= 0x80;
-}
-
-fn raw_header_checksum(header: &Header) -> u32 {
-    header
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .map(|(offset, byte)| {
-            if (148..156).contains(&offset) {
-                b' ' as u32
-            } else {
-                *byte as u32
-            }
-        })
-        .sum()
+fn raw_ustar_header(path: &[u8], entry_type: u8, size: u64) -> Header {
+    raw_header(Header::new_ustar(), path, entry_type, size)
 }
 
 fn append_raw(bytes: &mut Vec<u8>, header: &Header, data: &[u8]) {
@@ -112,19 +60,27 @@ fn append_raw(bytes: &mut Vec<u8>, header: &Header, data: &[u8]) {
     bytes.extend_from_slice(&vec![0; padding]);
 }
 
-async fn pax_records<R: AsyncRead + Unpin>(
-    entry: &mut async_tar::Entry<R>,
-) -> Vec<(String, String)> {
+async fn pax_payload(contents: &[u8], payload_path: &[u8]) -> (Vec<(String, String)>, Header) {
+    let mut raw = Archive::new(contents);
+    let mut entries = t!(raw.entries_raw());
+    let mut pax = t!(entries.next().await.unwrap());
+    assert!(pax.header().entry_type().is_pax_local_extensions());
+    assert!(pax.header().as_ustar().is_some());
+    assert!(pax.header().as_gnu().is_none());
     let mut records = Vec::new();
-    let extensions = t!(entry.pax_extensions().await).unwrap();
-    for extension in extensions {
+    for extension in t!(pax.pax_extensions().await).unwrap() {
         let extension = t!(extension);
         records.push((
             t!(extension.key()).to_owned(),
             t!(extension.value()).to_owned(),
         ));
     }
-    records
+    let payload = t!(entries.next().await.unwrap()).header().clone();
+    assert!(payload.as_ustar().is_some());
+    assert!(payload.as_gnu().is_none());
+    assert_eq!(&*payload.path_bytes(), payload_path);
+    assert!(entries.next().await.is_none());
+    (records, payload)
 }
 
 mod header;
@@ -181,7 +137,8 @@ async fn simple_concat() {
 #[tokio::test]
 async fn header_impls() {
     let mut ar = Archive::new(Cursor::new(tar!("simple.tar")));
-    let hnb = [0; 512];
+    let hn = Header::new_old();
+    let hnb = hn.as_bytes();
     let mut entries = t!(ar.entries());
     while let Some(file) = entries.next().await {
         let file = t!(file);
@@ -196,7 +153,8 @@ async fn header_impls() {
 #[tokio::test]
 async fn header_impls_missing_last_header() {
     let mut ar = Archive::new(Cursor::new(tar!("simple_missing_last_header.tar")));
-    let hnb = [0; 512];
+    let hn = Header::new_old();
+    let hnb = hn.as_bytes();
     let mut entries = t!(ar.entries());
 
     while let Some(file) = entries.next().await {
@@ -266,23 +224,9 @@ async fn append_data_long_path_uses_pax() {
     t!(ar.append_data(&long, 4, "data".as_bytes()).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut ar = Archive::new(&contents[..]);
-    let mut entries = t!(ar.entries_raw());
-
-    let mut pax = t!(entries.next().await.unwrap());
-    assert!(pax.header().entry_type().is_pax_local_extensions());
-    assert!(pax.header().as_ustar().is_some());
-    assert!(pax.header().as_gnu().is_none());
-    assert_eq!(
-        pax_records(&mut pax).await,
-        vec![("path".to_owned(), long.clone())]
-    );
-
-    let payload = t!(entries.next().await.unwrap());
-    assert!(payload.header().as_ustar().is_some());
-    assert!(payload.header().as_gnu().is_none());
-    assert!(!payload.header().entry_type().is_gnu_longname());
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(records, vec![("path".to_owned(), long.clone())]);
+    assert!(!payload.entry_type().is_gnu_longname());
 }
 
 #[tokio::test]
@@ -293,20 +237,8 @@ async fn append_data_short_non_ascii_path_uses_pax() {
     t!(ar.append_data(path, 0, &[][..]).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
-    assert!(pax.header().entry_type().is_pax_local_extensions());
-    assert_eq!(
-        pax_records(&mut pax).await,
-        vec![("path".to_owned(), path.to_owned())]
-    );
-
-    let payload = t!(entries.next().await.unwrap());
-    assert!(payload.header().as_ustar().is_some());
-    assert!(payload.header().as_gnu().is_none());
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert!(entries.next().await.is_none());
+    let (records, _) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(records, vec![("path".to_owned(), path.to_owned())]);
 
     let mut decoded = Archive::new(&contents[..]);
     let mut entries = t!(decoded.entries());
@@ -347,11 +279,9 @@ async fn append_data_numeric_overflows_use_pax() {
         .await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
     assert_eq!(
-        pax_records(&mut pax).await,
+        records,
         vec![
             ("path".to_owned(), path.clone()),
             ("uid".to_owned(), uid.to_string()),
@@ -360,12 +290,9 @@ async fn append_data_numeric_overflows_use_pax() {
         ]
     );
 
-    let payload = t!(entries.next().await.unwrap());
-    assert_eq!(t!(payload.header().uid()), 0);
-    assert_eq!(t!(payload.header().gid()), 0);
-    assert_eq!(t!(payload.header().mtime()), 0);
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert!(entries.next().await.is_none());
+    assert_eq!(t!(payload.uid()), 0);
+    assert_eq!(t!(payload.gid()), 0);
+    assert_eq!(t!(payload.mtime()), 0);
 
     let mut decoded = Archive::new(&contents[..]);
     let mut entries = t!(decoded.entries());
@@ -407,16 +334,9 @@ async fn append_data_size_overflow_uses_pax() {
     t!(ar.append_data("sized", size, &[][..]).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
-    assert_eq!(
-        pax_records(&mut pax).await,
-        vec![("size".to_owned(), size.to_string())]
-    );
-
-    let payload = t!(entries.next().await.unwrap());
-    assert_eq!(t!(payload.header().entry_size()), 0);
+    let (records, payload) = pax_payload(&contents, b"sized").await;
+    assert_eq!(records, vec![("size".to_owned(), size.to_string())]);
+    assert_eq!(t!(payload.entry_size()), 0);
 }
 
 #[tokio::test]
@@ -760,7 +680,7 @@ async fn append_dir_all_blank_dest() {
     t!(file2.flush().await);
 
     let mut ar = Builder::new(Vec::new());
-    t!(ar.append_dir_all_at_root(base_dir).await);
+    t!(ar.append_dir_all("", base_dir).await);
     let data = t!(ar.into_inner().await);
 
     let mut ar = Archive::new(Cursor::new(data));
@@ -820,7 +740,7 @@ async fn unpack_old_style_bsd_dir() {
 
     let mut bytes = Vec::new();
     let header = raw_old_header(b"testdir/", b'0', 0);
-    append_raw(&mut bytes, header.as_header(), &[]);
+    append_raw(&mut bytes, &header, &[]);
     bytes.extend_from_slice(&[0; 1024]);
 
     // Extracting
@@ -879,7 +799,7 @@ async fn extracting_malicious_tarball() {
     evil_tar = {
         fn append(a: &mut Vec<u8>, path: &'static str) {
             let header = raw_ustar_header(path.as_bytes(), b'0', 1);
-            append_raw(a, header.as_header(), &[1]);
+            append_raw(a, &header, &[1]);
         }
 
         append(&mut evil_tar, "/tmp/abs_evil.txt");
@@ -1070,7 +990,7 @@ async fn backslash_treated_well() {
     // Unpack an archive with a backslash in the name
     let mut data = Vec::new();
     let header = raw_ustar_header(b"foo\\bar", b'0', 0);
-    append_raw(&mut data, header.as_header(), &[]);
+    append_raw(&mut data, &header, &[]);
     data.extend_from_slice(&[0; 1024]);
     let mut ar = Archive::new(&data[..]);
     let f = t!(t!(ar.entries()).next().await.unwrap());
@@ -1089,10 +1009,7 @@ async fn nul_bytes_in_path() {
     let nul_path = OsStr::from_bytes(b"foo\0");
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let mut ar = Builder::new(Vec::<u8>::new());
-    let err = ar
-        .append_dir(Path::new(nul_path), td.path())
-        .await
-        .unwrap_err();
+    let err = ar.append_dir(nul_path, td.path()).await.unwrap_err();
     assert!(err.to_string().contains("Unicode control characters"));
 }
 
@@ -1242,7 +1159,7 @@ async fn pax_precedence() {
 async fn long_name_trailing_nul() {
     let mut bytes = Vec::new();
     let h = raw_ustar_header(b"././@LongLink", b'L', 4);
-    append_raw(&mut bytes, h.as_header(), b"foo\0");
+    append_raw(&mut bytes, &h, b"foo\0");
     let mut b = Builder::new(bytes);
     t!(b.append_data("bar", 6, b"foobar" as &[u8]).await);
 
@@ -1257,7 +1174,7 @@ async fn long_name_trailing_nul() {
 async fn long_linkname_trailing_nul() {
     let mut bytes = Vec::new();
     let h = raw_ustar_header(b"././@LongLink", b'K', 4);
-    append_raw(&mut bytes, h.as_header(), b"foo\0");
+    append_raw(&mut bytes, &h, b"foo\0");
     let mut b = Builder::new(bytes);
     t!(b.append_data("bar", 6, b"foobar" as &[u8]).await);
 
@@ -1521,30 +1438,17 @@ async fn append_path_long_symlink_uses_pax() {
     t!(ar.append_path_with_name(&source, &archive_path).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
-    assert!(pax.header().entry_type().is_pax_local_extensions());
-    assert!(pax.header().as_ustar().is_some());
-    assert!(pax.header().as_gnu().is_none());
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
     assert_eq!(
-        pax_records(&mut pax).await,
+        records,
         vec![
             ("path".to_owned(), archive_path),
             ("linkpath".to_owned(), target),
         ]
     );
 
-    let payload = t!(entries.next().await.unwrap());
-    assert!(payload.header().as_ustar().is_some());
-    assert!(payload.header().as_gnu().is_none());
-    assert!(!payload.header().entry_type().is_gnu_longlink());
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert_eq!(
-        &*payload.header().link_name_bytes().unwrap(),
-        b"pax-sym-link"
-    );
-    assert!(entries.next().await.is_none());
+    assert!(!payload.entry_type().is_gnu_longlink());
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-sym-link");
 }
 
 #[tokio::test]
@@ -1600,27 +1504,18 @@ async fn append_hard_link_long_values_use_pax() {
     t!(ar.append_hard_link(&archive_path, &target).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
-    assert!(pax.header().entry_type().is_pax_local_extensions());
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
     assert_eq!(
-        pax_records(&mut pax).await,
+        records,
         vec![
             ("path".to_owned(), archive_path),
             ("linkpath".to_owned(), target),
         ]
     );
 
-    let payload = t!(entries.next().await.unwrap());
-    assert!(payload.header().entry_type().is_hard_link());
-    assert_eq!(t!(payload.header().size()), 0);
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert_eq!(
-        &*payload.header().link_name_bytes().unwrap(),
-        b"pax-hard-link"
-    );
-    assert!(entries.next().await.is_none());
+    assert!(payload.entry_type().is_hard_link());
+    assert_eq!(t!(payload.size()), 0);
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-hard-link");
 }
 
 #[tokio::test]
@@ -1631,30 +1526,18 @@ async fn append_symlink_short_non_ascii_values_use_pax() {
     t!(ar.append_symlink(archive_path, target).await);
 
     let contents = t!(ar.into_inner().await);
-    let mut raw = Archive::new(&contents[..]);
-    let mut entries = t!(raw.entries_raw());
-    let mut pax = t!(entries.next().await.unwrap());
-    assert!(pax.header().entry_type().is_pax_local_extensions());
-    assert!(pax.header().as_gnu().is_none());
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
     assert_eq!(
-        pax_records(&mut pax).await,
+        records,
         vec![
             ("path".to_owned(), archive_path.to_owned()),
             ("linkpath".to_owned(), target.to_owned()),
         ]
     );
 
-    let payload = t!(entries.next().await.unwrap());
-    assert!(payload.header().as_ustar().is_some());
-    assert!(payload.header().as_gnu().is_none());
-    assert!(payload.header().entry_type().is_symlink());
-    assert_eq!(t!(payload.header().size()), 0);
-    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert_eq!(
-        &*payload.header().link_name_bytes().unwrap(),
-        b"pax-sym-link"
-    );
-    assert!(entries.next().await.is_none());
+    assert!(payload.entry_type().is_symlink());
+    assert_eq!(t!(payload.size()), 0);
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-sym-link");
 
     let mut decoded = Archive::new(&contents[..]);
     let mut entries = t!(decoded.entries());
@@ -1686,7 +1569,7 @@ async fn name_with_slash_doesnt_fool_long_link_and_bsd_compat() {
 
     let mut bytes = Vec::new();
     let h = raw_ustar_header(b"././@LongLink", b'L', 4);
-    append_raw(&mut bytes, h.as_header(), b"foo\0");
+    append_raw(&mut bytes, &h, b"foo\0");
     let mut ar = Builder::new(bytes);
 
     t!(ar.append_data("testdir/", 0, &mut io::empty()).await);
@@ -1853,7 +1736,7 @@ async fn header_size_overflow() {
     // maximal file size doesn't overflow anything
     let mut result = Vec::new();
     let header = raw_ustar_header(b"overflow", b'0', u64::MAX);
-    append_raw(&mut result, header.as_header(), b"x");
+    append_raw(&mut result, &header, b"x");
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let entry = e.next().await.unwrap();
@@ -1868,9 +1751,9 @@ async fn header_size_overflow() {
     // back-to-back entries that would overflow also don't panic
     let mut result = Vec::new();
     let first_header = raw_ustar_header(b"first", b'0', 1_000);
-    append_raw(&mut result, first_header.as_header(), &[0u8; 1_000]);
+    append_raw(&mut result, &first_header, &[0u8; 1_000]);
     let header = raw_ustar_header(b"overflow", b'0', u64::MAX - 513);
-    append_raw(&mut result, header.as_header(), b"x");
+    append_raw(&mut result, &header, b"x");
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let first = e.next().await.unwrap();

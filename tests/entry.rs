@@ -24,47 +24,23 @@ fn raw_header(
     typeflag: u8,
     size: u64,
     mode: u32,
-) -> async_tar::UstarHeader {
-    let mut header: async_tar::UstarHeader = unsafe { std::mem::zeroed() };
-    header.name[..path.len()].copy_from_slice(path);
+) -> async_tar::Header {
+    let mut header = async_tar::Header::new_ustar();
+    header.as_old_mut().name[..path.len()].copy_from_slice(path);
     if let Some(target) = target {
-        header.linkname[..target.len()].copy_from_slice(target);
+        header.as_old_mut().linkname[..target.len()].copy_from_slice(target);
     }
-    header.typeflag = [typeflag];
-    header.magic = *b"ustar\0";
-    header.version = *b"00";
-    encode_octal(&mut header.mode, mode as u64);
-    encode_octal(&mut header.uid, 0);
-    encode_octal(&mut header.gid, 0);
-    encode_octal(&mut header.size, size);
-    encode_octal(&mut header.mtime, 0);
-    let checksum = header
-        .as_header()
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .map(|(offset, byte)| {
-            if (148..156).contains(&offset) {
-                b' ' as u32
-            } else {
-                *byte as u32
-            }
-        })
-        .sum::<u32>();
-    encode_octal(&mut header.cksum, checksum as u64);
+    header.set_entry_type(async_tar::EntryType::new(typeflag));
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_size(size);
+    header.set_cksum();
     header
 }
 
-fn raw_link_header(path: &[u8], target: &[u8]) -> async_tar::UstarHeader {
+fn raw_link_header(path: &[u8], target: &[u8]) -> async_tar::Header {
     raw_header(path, Some(target), b'1', 0, 0o644)
-}
-
-fn encode_octal(dst: &mut [u8], value: u64) {
-    let octal = format!("{value:o}");
-    let value = std::iter::once(b'\0').chain(octal.bytes().rev().chain(std::iter::repeat(b'0')));
-    for (slot, value) in dst.iter_mut().rev().zip(value) {
-        *slot = value;
-    }
 }
 
 fn append_raw(bytes: &mut Vec<u8>, header: &async_tar::Header, data: &[u8]) {
@@ -98,12 +74,12 @@ async fn absolute_hardlink() {
     let td = t!(Builder::new().prefix("tar").tempdir());
     let mut bytes = Vec::new();
     let file_header = raw_header(b"foo", None, b'0', 0, 0o644);
-    append_raw(&mut bytes, file_header.as_header(), &[]);
+    append_raw(&mut bytes, &file_header, &[]);
 
     // This absolute path under tempdir will be created at unpack time
     let target = td.path().join("foo");
     let header = raw_link_header(b"bar", target.to_str().unwrap().as_bytes());
-    append_raw(&mut bytes, header.as_header(), &[]);
+    append_raw(&mut bytes, &header, &[]);
     bytes.extend_from_slice(&[0; 1024]);
 
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -267,7 +243,7 @@ async fn good_parent_paths_ok() {
 async fn modify_hard_link_just_created() {
     let mut bytes = Vec::new();
     let header = raw_link_header(b"foo", b"../test");
-    append_raw(&mut bytes, header.as_header(), &[]);
+    append_raw(&mut bytes, &header, &[]);
     let mut ar = async_tar::Builder::new(bytes);
 
     t!(ar.append_data("foo", 1, &b"x"[..]).await);
@@ -374,7 +350,7 @@ async fn malformed_pax_path_extension() {
     );
 
     // Manually write the archive
-    ar_bytes.extend_from_slice(pax_header.as_header().as_bytes());
+    ar_bytes.extend_from_slice(pax_header.as_bytes());
     ar_bytes.extend_from_slice(malformed_pax);
     // Pad to 512 byte boundary
     let padding = (512 - (malformed_pax.len() % 512)) % 512;
@@ -382,7 +358,7 @@ async fn malformed_pax_path_extension() {
 
     // Now add the actual file entry
     let header = raw_header(b"file", None, b'0', 4, 0o644);
-    ar_bytes.extend_from_slice(header.as_header().as_bytes());
+    ar_bytes.extend_from_slice(header.as_bytes());
     ar_bytes.extend_from_slice(b"test");
     // Pad to 512 byte boundary
     ar_bytes.extend_from_slice(&vec![0u8; 508]);
