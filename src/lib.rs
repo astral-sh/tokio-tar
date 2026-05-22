@@ -24,11 +24,12 @@ use std::io::Error;
 
 pub use crate::{
     archive::{Archive, ArchiveBuilder, Entries},
-    builder::Builder,
+    builder::{Builder, EntryMetadata},
     entry::{Entry, Unpacked},
     entry_type::EntryType,
     error::TarError,
     header::{GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader},
+    name::{LinkTarget, Name},
     pax::{PaxExtension, PaxExtensions},
 };
 
@@ -39,6 +40,7 @@ mod entry_type;
 mod error;
 mod fs;
 mod header;
+mod name;
 mod pax;
 
 fn other(msg: &str) -> Error {

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* Restricted archive writing to validated high-level PAX/USTAR builder APIs.
+  Archive names and symbolic-link targets are now validated UTF-8 values, and
+  valid non-ASCII values are emitted using PAX `path`/`linkpath` records.
+* Removed raw writable `Header`/`Builder::append` entry construction in favor
+  of generated-entry methods and `EntryMetadata`.
+
 ## 0.5.6
 
 * Fixed a parser desynchronization vulnerability when reading tar archives that

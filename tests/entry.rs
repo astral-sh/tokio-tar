@@ -18,17 +18,66 @@ macro_rules! t {
     };
 }
 
+fn raw_header(
+    path: &[u8],
+    target: Option<&[u8]>,
+    typeflag: u8,
+    size: u64,
+    mode: u32,
+) -> async_tar::UstarHeader {
+    let mut header: async_tar::UstarHeader = unsafe { std::mem::zeroed() };
+    header.name[..path.len()].copy_from_slice(path);
+    if let Some(target) = target {
+        header.linkname[..target.len()].copy_from_slice(target);
+    }
+    header.typeflag = [typeflag];
+    header.magic = *b"ustar\0";
+    header.version = *b"00";
+    encode_octal(&mut header.mode, mode as u64);
+    encode_octal(&mut header.uid, 0);
+    encode_octal(&mut header.gid, 0);
+    encode_octal(&mut header.size, size);
+    encode_octal(&mut header.mtime, 0);
+    let checksum = header
+        .as_header()
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .map(|(offset, byte)| {
+            if (148..156).contains(&offset) {
+                b' ' as u32
+            } else {
+                *byte as u32
+            }
+        })
+        .sum::<u32>();
+    encode_octal(&mut header.cksum, checksum as u64);
+    header
+}
+
+fn raw_link_header(path: &[u8], target: &[u8]) -> async_tar::UstarHeader {
+    raw_header(path, Some(target), b'1', 0, 0o644)
+}
+
+fn encode_octal(dst: &mut [u8], value: u64) {
+    let octal = format!("{value:o}");
+    let value = std::iter::once(b'\0').chain(octal.bytes().rev().chain(std::iter::repeat(b'0')));
+    for (slot, value) in dst.iter_mut().rev().zip(value) {
+        *slot = value;
+    }
+}
+
+fn append_raw(bytes: &mut Vec<u8>, header: &async_tar::Header, data: &[u8]) {
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(data);
+    let padding = (512 - data.len() % 512) % 512;
+    bytes.extend_from_slice(&vec![0; padding]);
+}
+
 #[tokio::test]
 async fn absolute_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "/bar").await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -47,25 +96,16 @@ async fn absolute_symlink() {
 #[tokio::test]
 async fn absolute_hardlink() {
     let td = t!(Builder::new().prefix("tar").tempdir());
-    let mut ar = async_tar::Builder::new(Vec::new());
+    let mut bytes = Vec::new();
+    let file_header = raw_header(b"foo", None, b'0', 0, 0o644);
+    append_raw(&mut bytes, file_header.as_header(), &[]);
 
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Link));
-    t!(header.set_path("bar"));
     // This absolute path under tempdir will be created at unpack time
-    t!(header.set_link_name(td.path().join("foo")));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    let target = td.path().join("foo");
+    let header = raw_link_header(b"bar", target.to_str().unwrap().as_bytes());
+    append_raw(&mut bytes, header.as_header(), &[]);
+    bytes.extend_from_slice(&[0; 1024]);
 
-    let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
 
     t!(ar.unpack(td.path()).await);
@@ -76,21 +116,8 @@ async fn absolute_hardlink() {
 #[tokio::test]
 async fn relative_hardlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Link));
-    t!(header.set_path("bar"));
-    t!(header.set_link_name("foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_data("foo", 0, &[][..]).await);
+    t!(ar.append_hard_link("bar", "foo").await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -104,21 +131,8 @@ async fn relative_hardlink() {
 #[tokio::test]
 async fn absolute_link_deref_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("/"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "/").await);
+    t!(ar.append_data("foo/bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -132,21 +146,8 @@ async fn absolute_link_deref_error() {
 #[tokio::test]
 async fn relative_link_deref_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("../../../../"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "../../../../").await);
+    t!(ar.append_data("foo/bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -163,14 +164,9 @@ async fn directory_permissions_are_cleared() {
     use ::std::os::unix::fs::PermissionsExt;
 
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Directory));
-    t!(header.set_path("foo"));
-    header.set_mode(0o777);
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar
+        .append_directory_with_metadata("foo", async_tar::EntryMetadata::new().mode(0o777))
+        .await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -197,28 +193,9 @@ async fn directory_permissions_are_cleared() {
 #[cfg(not(windows))] // dangling symlinks have weird permissions
 async fn modify_link_just_created() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("bar/foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "bar").await);
+    t!(ar.append_data("bar/foo", 0, &[][..]).await);
+    t!(ar.append_data("foo/bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -236,21 +213,8 @@ async fn modify_link_just_created() {
 #[cfg(not(windows))] // dangling symlinks have weird permissions
 async fn modify_outside_with_relative_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("symlink"));
-    t!(header.set_link_name(".."));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("symlink/foo/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("symlink", "..").await);
+    t!(ar.append_data("symlink/foo/bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -264,21 +228,8 @@ async fn modify_outside_with_relative_symlink() {
 #[tokio::test]
 async fn parent_paths_error() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name(".."));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "..").await);
+    t!(ar.append_data("foo/bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -294,21 +245,13 @@ async fn parent_paths_error() {
 async fn good_parent_paths_ok() {
     use std::path::PathBuf;
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path(PathBuf::from("foo").join("bar")));
-    t!(header.set_link_name(PathBuf::from("..").join("bar")));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar
+        .append_symlink(
+            PathBuf::from("foo").join("bar"),
+            PathBuf::from("..").join("bar")
+        )
+        .await);
+    t!(ar.append_data("bar", 0, &[][..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -322,22 +265,12 @@ async fn good_parent_paths_ok() {
 
 #[tokio::test]
 async fn modify_hard_link_just_created() {
-    let mut ar = async_tar::Builder::new(Vec::new());
+    let mut bytes = Vec::new();
+    let header = raw_link_header(b"foo", b"../test");
+    append_raw(&mut bytes, header.as_header(), &[]);
+    let mut ar = async_tar::Builder::new(bytes);
 
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Link));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("../test"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(1);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &b"x"[..]).await);
+    t!(ar.append_data("foo", 1, &b"x"[..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -358,21 +291,8 @@ async fn modify_hard_link_just_created() {
 #[tokio::test]
 async fn modify_symlink_just_created() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("../test"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(1);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("foo"));
-    header.set_cksum();
-    t!(ar.append(&header, &b"x"[..]).await);
+    t!(ar.append_symlink("foo", "../test").await);
+    t!(ar.append_data("foo", 1, &b"x"[..]).await);
 
     let bytes = t!(ar.into_inner().await);
     let mut ar = async_tar::Archive::new(&bytes[..]);
@@ -393,14 +313,7 @@ async fn modify_symlink_just_created() {
 #[tokio::test]
 async fn deny_absolute_symlink() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("/bar"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "/bar").await);
 
     let bytes = t!(ar.into_inner().await);
 
@@ -414,14 +327,7 @@ async fn deny_absolute_symlink() {
 #[tokio::test]
 async fn deny_relative_link() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name("../../../../"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", "../../../../").await);
 
     let bytes = t!(ar.into_inner().await);
 
@@ -436,21 +342,8 @@ async fn deny_relative_link() {
 #[cfg(unix)]
 async fn accept_relative_link() {
     let mut ar = async_tar::Builder::new(Vec::new());
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo/bar"));
-    t!(header.set_link_name("../baz"));
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(1);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("baz"));
-    header.set_cksum();
-    t!(ar.append(&header, &b"x"[..]).await);
+    t!(ar.append_symlink("foo/bar", "../baz").await);
+    t!(ar.append_data("baz", 1, &b"x"[..]).await);
 
     let bytes = t!(ar.into_inner().await);
 
@@ -469,30 +362,27 @@ async fn malformed_pax_path_extension() {
     let mut ar_bytes = Vec::new();
 
     // First, create a PAX extension header with malformed content
-    let mut pax_header = async_tar::Header::new_ustar();
-    t!(pax_header.set_entry_type(async_tar::EntryType::new(b'x'))); // PAX local extensions
-    t!(pax_header.set_path("PaxHeaders/file"));
-
     // Create malformed PAX extension data - the length field doesn't match the actual content length
     // Format is: "<length> <key>=<value>\n" where length includes itself
     let malformed_pax = b"99 path=test.txt\n"; // Claims to be 99 bytes but is only 17 bytes
-    pax_header.set_size(malformed_pax.len() as u64);
-    pax_header.set_cksum();
+    let pax_header = raw_header(
+        b"PaxHeaders/file",
+        None,
+        b'x',
+        malformed_pax.len() as u64,
+        0o644,
+    );
 
     // Manually write the archive
-    ar_bytes.extend_from_slice(pax_header.as_bytes());
+    ar_bytes.extend_from_slice(pax_header.as_header().as_bytes());
     ar_bytes.extend_from_slice(malformed_pax);
     // Pad to 512 byte boundary
     let padding = (512 - (malformed_pax.len() % 512)) % 512;
     ar_bytes.extend_from_slice(&vec![0u8; padding]);
 
     // Now add the actual file entry
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(4);
-    t!(header.set_entry_type(async_tar::EntryType::Regular));
-    t!(header.set_path("file"));
-    header.set_cksum();
-    ar_bytes.extend_from_slice(header.as_bytes());
+    let header = raw_header(b"file", None, b'0', 4, 0o644);
+    ar_bytes.extend_from_slice(header.as_header().as_bytes());
     ar_bytes.extend_from_slice(b"test");
     // Pad to 512 byte boundary
     ar_bytes.extend_from_slice(&vec![0u8; 508]);
@@ -544,22 +434,10 @@ async fn symlink_dir_collision_does_not_chmod_external_dir() {
 
     // Add the entries to the archive: one symlink to the target, followed by
     // another entry of the same name that sets the target to 0777.
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Symlink));
-    t!(header.set_path("foo"));
-    t!(header.set_link_name(&target));
-    header.set_mode(0o777);
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
-
-    let mut header = async_tar::Header::new_ustar();
-    header.set_size(0);
-    t!(header.set_entry_type(async_tar::EntryType::Directory));
-    t!(header.set_path("foo"));
-    header.set_mode(0o777);
-    header.set_cksum();
-    t!(ar.append(&header, &[][..]).await);
+    t!(ar.append_symlink("foo", &target).await);
+    t!(ar
+        .append_directory_with_metadata("foo", async_tar::EntryMetadata::new().mode(0o777))
+        .await);
 
     // Get our raw archive.
     let bytes = t!(ar.into_inner().await);
