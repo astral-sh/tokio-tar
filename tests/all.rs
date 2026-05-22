@@ -1558,7 +1558,44 @@ async fn append_path_long_symlink_uses_pax() {
     assert!(payload.header().as_gnu().is_none());
     assert!(!payload.header().entry_type().is_gnu_longlink());
     assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
-    assert!(payload.header().link_name_bytes().is_none());
+    assert_eq!(
+        &*payload.header().link_name_bytes().unwrap(),
+        b"././@LongSymLink"
+    );
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn append_link_long_hardlink_uses_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let archive_path = "hardlink-path".repeat(30);
+    let target = "hardlink-target".repeat(20);
+    let mut header = Header::new_ustar();
+    t!(header.set_entry_type(EntryType::Link));
+    header.set_size(0);
+
+    t!(ar.append_link(&mut header, &archive_path, &target).await);
+
+    let contents = t!(ar.into_inner().await);
+    let mut raw = Archive::new(&contents[..]);
+    let mut entries = t!(raw.entries_raw());
+    let mut pax = t!(entries.next().await.unwrap());
+    assert!(pax.header().entry_type().is_pax_local_extensions());
+    assert_eq!(
+        pax_records(&mut pax).await,
+        vec![
+            ("path".to_owned(), archive_path),
+            ("linkpath".to_owned(), target),
+        ]
+    );
+
+    let payload = t!(entries.next().await.unwrap());
+    assert!(payload.header().entry_type().is_hard_link());
+    assert_eq!(&*payload.header().path_bytes(), b"pax-entry");
+    assert_eq!(
+        &*payload.header().link_name_bytes().unwrap(),
+        b"././@LongHardLink"
+    );
     assert!(entries.next().await.is_none());
 }
 

@@ -220,6 +220,64 @@ impl<W: Write + Unpin + Send> Builder<W> {
         Ok(())
     }
 
+    /// Adds a new link entry to this archive with the specified path and target.
+    ///
+    /// This function supports either a hard link or a symbolic link header. It
+    /// will set the specified path and link target in the header, appending a
+    /// PAX extension entry first when either value cannot fit in USTAR. The
+    /// checksum for the header will be automatically updated via the
+    /// `set_cksum` method. No other metadata in the header will be modified.
+    ///
+    /// The header entry type must be [`EntryType::Link`] or
+    /// [`EntryType::Symlink`]. Link entries do not carry archive data, so the
+    /// header size must be zero.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error for any intermittent I/O error which
+    /// occurs when writing, or if the header cannot describe a USTAR/PAX link
+    /// entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// #
+    /// use tokio_tar::{Builder, EntryType, Header};
+    ///
+    /// let mut header = Header::new_ustar();
+    /// header.set_entry_type(EntryType::Symlink)?;
+    /// header.set_size(0);
+    ///
+    /// let mut ar = Builder::new(Vec::new());
+    /// ar.append_link(&mut header, "link", "really/long/link/target").await?;
+    /// let data = ar.into_inner().await?;
+    /// #
+    /// # Ok(()) }) }
+    /// ```
+    pub async fn append_link<P: AsRef<Path>, T: AsRef<Path>>(
+        &mut self,
+        header: &mut Header,
+        path: P,
+        target: T,
+    ) -> io::Result<()> {
+        validate_header_format_for_write(header)?;
+        if !header.entry_type().is_hard_link() && !header.entry_type().is_symlink() {
+            return Err(other("cannot append a non-link header as a link"));
+        }
+
+        let mut pax_extensions = Vec::new();
+        prepare_header_path(header, path.as_ref(), &mut pax_extensions)?;
+        prepare_header_link(header, target.as_ref(), &mut pax_extensions)?;
+        prepare_header_numeric_fields(header, &mut pax_extensions)?;
+        validate_header_for_write(header)?;
+        append_pax_extensions(self.get_mut(), &pax_extensions).await?;
+        header.set_cksum();
+        self.append(header, &[][..]).await?;
+
+        Ok(())
+    }
+
     /// Adds a file on the local filesystem to this archive.
     ///
     /// This function will open the file specified by `path` and insert the file
@@ -464,6 +522,12 @@ async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
 
 const PAX_HEADER_PATH: &str = "PaxHeaders/pax-entry";
 const PAX_PAYLOAD_PATH: &str = "pax-entry";
+// libarchive uses these special `linkname` values (in the USTAR header)
+// when adding a `linkpath` PAX extension.
+// Technically the value of the `linkname` is not important, since a PAX-compliant
+// reader should ignore it when the `linkpath` extension is present.
+const PAX_HARD_LINK_FALLBACK: &[u8] = b"././@LongHardLink";
+const PAX_SYM_LINK_FALLBACK: &[u8] = b"././@LongSymLink";
 
 struct PaxExtension {
     key: &'static [u8],
@@ -611,7 +675,14 @@ fn prepare_header_link(
     header.as_old_mut().linkname.fill(0);
     if header.set_link_name(link_name).is_err() {
         let data = link_name2pax_bytes(link_name)?;
-        header.as_old_mut().linkname.fill(0);
+        let fallback = if header.entry_type().is_hard_link() {
+            PAX_HARD_LINK_FALLBACK
+        } else {
+            PAX_SYM_LINK_FALLBACK
+        };
+        let linkname = &mut header.as_old_mut().linkname;
+        linkname.fill(0);
+        linkname[..fallback.len()].copy_from_slice(fallback);
         push_pax_extension(pax_extensions, b"linkpath", data);
     }
     Ok(())
