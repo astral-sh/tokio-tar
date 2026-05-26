@@ -16,7 +16,6 @@ use tokio::{
 use tokio_stream::*;
 
 use async_tar::{Archive, ArchiveBuilder, Builder, EntryMetadata, EntryType, Header};
-use filetime::FileTime;
 use tempfile::{Builder as TempBuilder, TempDir};
 
 macro_rules! t {
