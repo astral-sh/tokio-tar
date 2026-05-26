@@ -52,87 +52,35 @@ fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
     set_file_times(&file, mtime)
 }
 
-#[cfg(all(
-    unix,
-    any(
-        target_os = "android",
-        target_os = "aix",
-        target_os = "solaris",
-        target_os = "illumos",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "haiku"
-    )
-))]
+#[cfg(all(unix, not(any(target_os = "redox", target_os = "emscripten"))))]
 fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    use rustix::fs::{utimensat, AtFlags, Timespec, Timestamps, CWD};
 
     let duration = mtime
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime predates the Unix epoch"))?;
-    let seconds = libc::time_t::try_from(duration.as_secs())
+    let seconds = duration
+        .as_secs()
+        .try_into()
         .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime exceeds platform limits"))?;
-    let timestamp = libc::timespec {
-        tv_sec: seconds,
-        tv_nsec: duration.subsec_nanos() as _,
+    let nanoseconds = duration.subsec_nanos().into();
+    let timestamps = Timestamps {
+        last_access: Timespec {
+            tv_sec: seconds,
+            tv_nsec: nanoseconds,
+        },
+        last_modification: Timespec {
+            tv_sec: seconds,
+            tv_nsec: nanoseconds,
+        },
     };
-    let timestamps = [timestamp, timestamp];
-    let dst = CString::new(dst.as_os_str().as_bytes())?;
-    let result = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            dst.as_ptr(),
-            timestamps.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(Error::last_os_error())
-    }
-}
-
-#[cfg(all(
-    unix,
-    not(any(
-        target_os = "redox",
-        target_os = "emscripten",
-        target_os = "android",
-        target_os = "aix",
-        target_os = "solaris",
-        target_os = "illumos",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "haiku"
-    ))
-))]
-fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-    let duration = mtime
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime predates the Unix epoch"))?;
-    let seconds = libc::time_t::try_from(duration.as_secs())
-        .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime exceeds platform limits"))?;
-    let timestamp = libc::timeval {
-        tv_sec: seconds,
-        tv_usec: duration.subsec_micros() as _,
-    };
-    let timestamps = [timestamp, timestamp];
-    let dst = CString::new(dst.as_os_str().as_bytes())?;
-    let result = unsafe { libc::lutimes(dst.as_ptr(), timestamps.as_ptr()) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(Error::last_os_error())
-    }
+    utimensat(CWD, dst, &timestamps, AtFlags::SYMLINK_NOFOLLOW).map_err(Into::into)
 }
 
 #[cfg(any(all(unix, target_os = "emscripten"), all(not(unix), not(windows))))]
 fn set_symlink_file_times(_: &Path, _: SystemTime) -> io::Result<()> {
+    // NOTE: This imitates `filetime`, which explicitly fails on these platforms.
+    // See: <https://docs.rs/crate/filetime/0.2.29/source/src/wasm.rs#7>
     Err(Error::new(
         ErrorKind::Unsupported,
         "setting timestamps on symlinks is not supported on this platform",

@@ -25,6 +25,7 @@ dependencies = [
  "libc",
  "portable-atomic",
  "rustc-hash",
+ "rustix",
  "tempfile",
  "tokio",
  "tokio-stream",
