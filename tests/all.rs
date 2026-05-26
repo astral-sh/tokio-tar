@@ -1,6 +1,5 @@
 extern crate tokio_tar as async_tar;
 
-extern crate filetime;
 extern crate tempfile;
 #[cfg(all(unix, feature = "xattr"))]
 extern crate xattr;
@@ -8,6 +7,7 @@ extern crate xattr;
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 use tokio::{
     fs::{self, File},
@@ -965,12 +965,12 @@ async fn file_times() {
     t!(ar.unpack(td.path()).await);
 
     let meta = fs::metadata(td.path().join("a")).await.unwrap();
-    let mtime = FileTime::from_last_modification_time(&meta);
-    let atime = FileTime::from_last_access_time(&meta);
-    assert_eq!(mtime.unix_seconds(), 1_000_000_000);
-    assert_eq!(mtime.nanoseconds(), 0);
-    assert_eq!(atime.unix_seconds(), 1_000_000_000);
-    assert_eq!(atime.nanoseconds(), 0);
+    let mtime = t!(t!(meta.modified()).duration_since(UNIX_EPOCH));
+    let atime = t!(t!(meta.accessed()).duration_since(UNIX_EPOCH));
+    assert_eq!(mtime.as_secs(), 1_000_000_000);
+    assert_eq!(mtime.subsec_nanos(), 0);
+    assert_eq!(atime.as_secs(), 1_000_000_000);
+    assert_eq!(atime.subsec_nanos(), 0);
 }
 
 #[tokio::test]
@@ -1036,8 +1036,8 @@ async fn unpack_links() {
     let md = t!(fs::symlink_metadata(td.path().join("lnk")).await);
     assert!(md.file_type().is_symlink());
 
-    let mtime = FileTime::from_last_modification_time(&md);
-    assert_eq!(mtime.unix_seconds(), 1448291033);
+    let mtime = t!(t!(md.modified()).duration_since(UNIX_EPOCH));
+    assert_eq!(mtime.as_secs(), 1448291033);
 
     assert_eq!(
         &*t!(fs::read_link(td.path().join("lnk")).await),
