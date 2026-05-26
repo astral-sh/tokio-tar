@@ -1,11 +1,12 @@
 use crate::{
-    header::{path2bytes, HeaderMode},
+    header::HeaderMode,
+    name::{archive_name as checked, link_target},
     other, EntryType, Header,
 };
-use std::{fs::Metadata, path::Path, str};
+use std::{fs::Metadata, path::Path};
 use tokio::{
     fs,
-    io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
+    io::{self, AsyncRead as Read, AsyncWrite as Write, AsyncWriteExt},
 };
 
 /// A structure for building archives
@@ -20,7 +21,61 @@ pub struct Builder<W: Write + Unpin + Send> {
     cancellation: Option<tokio::sync::oneshot::Sender<W>>,
 }
 
+/// Metadata overrides for a generated entry written through [`Builder`].
+///
+/// Filesystem-based builder methods take metadata from their source path.
+/// Generated entry methods use conventional permissions unless `mode` is
+/// overridden; the other numeric fields default to zero.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EntryMetadata {
+    mode: Option<u32>,
+    uid: u64,
+    gid: u64,
+    mtime: u64,
+}
+
+impl EntryMetadata {
+    /// Creates empty metadata overrides.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the Unix mode bits for the entry.
+    pub fn mode(mut self, mode: u32) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Sets the owner user ID for the entry.
+    pub fn uid(mut self, uid: u64) -> Self {
+        self.uid = uid;
+        self
+    }
+
+    /// Sets the owner group ID for the entry.
+    pub fn gid(mut self, gid: u64) -> Self {
+        self.gid = gid;
+        self
+    }
+
+    /// Sets the modification time, as Unix seconds, for the entry.
+    pub fn mtime(mut self, mtime: u64) -> Self {
+        self.mtime = mtime;
+        self
+    }
+
+    fn apply(self, header: &mut Header, default_mode: u32) {
+        header.set_mode(self.mode.unwrap_or(default_mode));
+        header.set_uid(self.uid);
+        header.set_gid(self.gid);
+        header.set_mtime(self.mtime);
+    }
+}
+
 const TERMINATION: &[u8; 1024] = &[0; 1024];
+const DEFAULT_FILE_MODE: u32 = 0o644;
+const DEFAULT_DIRECTORY_MODE: u32 = 0o755;
+const DEFAULT_SYMLINK_MODE: u32 = 0o777;
 
 impl<W: Write + Unpin + Send + 'static> Builder<W> {
     /// Create a new archive builder with the underlying object as the
@@ -64,7 +119,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
 
     /// Changes the HeaderMode that will be used when reading fs Metadata for
     /// methods that implicitly read metadata for an input Path. Notably, this
-    /// does _not_ apply to `append(Header)`.
+    /// does not apply to generated entries supplied with [`EntryMetadata`].
     pub fn mode(&mut self, mode: HeaderMode) {
         self.mode = mode;
     }
@@ -85,13 +140,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
         self.obj.as_ref().unwrap()
     }
 
-    /// Gets mutable reference to the underlying object.
-    ///
-    /// Note that care must be taken while writing to the underlying
-    /// object. But, e.g. `get_mut().flush()` is claimed to be safe and
-    /// useful in the situations when one needs to be ensured that
-    /// tar entry was flushed to the disk.
-    pub fn get_mut(&mut self) -> &mut W {
+    fn get_mut(&mut self) -> &mut W {
         self.obj.as_mut().unwrap()
     }
 
@@ -107,13 +156,11 @@ impl<W: Write + Unpin + Send> Builder<W> {
         Ok(self.obj.take().unwrap())
     }
 
-    /// Adds a new entry to this archive.
+    /// Adds a generated regular-file entry to this archive.
     ///
-    /// This function will append the header specified, followed by contents of
-    /// the stream specified by `data`. To produce a valid archive the `size`
-    /// field of `header` must be the same as the length of the stream that's
-    /// being written. Additionally the checksum for the header should have been
-    /// set via the `set_cksum` method.
+    /// A PAX `path` extension is emitted when the validated name is too
+    /// long for USTAR or contains non-ASCII UTF-8. `size` must equal the
+    /// number of bytes read from `data`.
     ///
     /// Note that this will not attempt to seek the archive to a valid position,
     /// so if the archive is in the middle of a read or some other similar
@@ -132,86 +179,114 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio_tar::{Builder, Header};
-    ///
-    /// let mut header = Header::new_gnu();
-    /// header.set_path("foo")?;
-    /// header.set_size(4);
-    /// header.set_cksum();
+    /// use tokio_tar::Builder;
     ///
     /// let mut data: &[u8] = &[1, 2, 3, 4];
     ///
     /// let mut ar = Builder::new(Vec::new());
-    /// ar.append(&header, data).await?;
+    /// ar.append_data("really/long/path/to/foo", 4, data).await?;
     /// let data = ar.into_inner().await?;
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn append<R: Read + Unpin>(
+    pub async fn append_data<N: AsRef<Path>, R>(
         &mut self,
-        header: &Header,
-        mut data: R,
-    ) -> io::Result<()> {
-        append(self.get_mut(), header, &mut data).await?;
-
-        Ok(())
+        path: N,
+        size: u64,
+        data: R,
+    ) -> io::Result<()>
+    where
+        R: Read + Unpin,
+    {
+        self.append_data_with_metadata(path, size, EntryMetadata::new(), data)
+            .await
     }
 
-    /// Adds a new entry to this archive with the specified path.
-    ///
-    /// This function will set the specified path in the given header, which may
-    /// require appending a GNU long-name extension entry to the archive first.
-    /// The checksum for the header will be automatically updated via the
-    /// `set_cksum` method after setting the path. No other metadata in the
-    /// header will be modified.
-    ///
-    /// Then it will append the header, followed by contents of the stream
-    /// specified by `data`. To produce a valid archive the `size` field of
-    /// `header` must be the same as the length of the stream that's being
-    /// written.
-    ///
-    /// Note that this will not attempt to seek the archive to a valid position,
-    /// so if the archive is in the middle of a read or some other similar
-    /// operation then this may corrupt the archive.
-    ///
-    /// Also note that after all entries have been written to an archive the
-    /// `finish` function needs to be called to finish writing the archive.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error for any intermittent I/O error which
-    /// occurs when either reading or writing.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
-    /// #
-    /// use tokio_tar::{Builder, Header};
-    ///
-    /// let mut header = Header::new_gnu();
-    /// header.set_size(4);
-    /// header.set_cksum();
-    ///
-    /// let mut data: &[u8] = &[1, 2, 3, 4];
-    ///
-    /// let mut ar = Builder::new(Vec::new());
-    /// ar.append_data(&mut header, "really/long/path/to/foo", data).await?;
-    /// let data = ar.into_inner().await?;
-    /// #
-    /// # Ok(()) }) }
-    /// ```
-    pub async fn append_data<P: AsRef<Path>, R: Read + Unpin>(
+    /// Adds a generated regular-file entry with explicitly supplied metadata.
+    pub async fn append_data_with_metadata<N, R>(
         &mut self,
-        header: &mut Header,
-        path: P,
+        path: N,
+        size: u64,
+        metadata: EntryMetadata,
         data: R,
-    ) -> io::Result<()> {
-        prepare_header_path(self.get_mut(), header, path.as_ref()).await?;
-        header.set_cksum();
-        self.append(header, data).await?;
+    ) -> io::Result<()>
+    where
+        N: AsRef<Path>,
+        R: Read + Unpin,
+    {
+        let entry = generated_entry(
+            &checked(path.as_ref())?,
+            size,
+            EntryType::Regular,
+            metadata,
+            DEFAULT_FILE_MODE,
+        )?;
+        append_generated(self.get_mut(), entry, data).await
+    }
 
-        Ok(())
+    /// Adds a generated hard-link entry, using PAX for an overlong or non-ASCII value.
+    pub async fn append_hard_link<N: AsRef<Path>, T: AsRef<Path>>(
+        &mut self,
+        path: N,
+        target: T,
+    ) -> io::Result<()> {
+        let mut entry = generated_entry(
+            &checked(path.as_ref())?,
+            0,
+            EntryType::Link,
+            EntryMetadata::new(),
+            DEFAULT_FILE_MODE,
+        )?;
+        let target = checked(target.as_ref())?;
+        prepare_header_link(&mut entry.0, &mut entry.1, &target, PAX_HARD_LINK_FALLBACK);
+        append_generated(self.get_mut(), entry, &[][..]).await
+    }
+
+    /// Adds a new symbolic-link entry to this archive with the specified name and target.
+    ///
+    /// Valid non-ASCII or overlong values are written using PAX `path` or
+    /// `linkpath` records. The entry type is set to [`EntryType::Symlink`] and
+    /// the size is set to zero.
+    pub async fn append_symlink<N: AsRef<Path>, T: AsRef<Path>>(
+        &mut self,
+        path: N,
+        target: T,
+    ) -> io::Result<()> {
+        let mut entry = generated_entry(
+            &checked(path.as_ref())?,
+            0,
+            EntryType::Symlink,
+            EntryMetadata::new(),
+            DEFAULT_SYMLINK_MODE,
+        )?;
+        let target = link_target(target.as_ref())?;
+        prepare_header_link(&mut entry.0, &mut entry.1, &target, PAX_SYM_LINK_FALLBACK);
+        append_generated(self.get_mut(), entry, &[][..]).await
+    }
+
+    /// Adds a generated directory entry with conventional default permissions.
+    pub async fn append_directory<N: AsRef<Path>>(&mut self, path: N) -> io::Result<()> {
+        self.append_directory_with_metadata(path, EntryMetadata::new())
+            .await
+    }
+
+    /// Adds a generated directory entry with explicitly supplied metadata.
+    pub async fn append_directory_with_metadata<N>(
+        &mut self,
+        path: N,
+        metadata: EntryMetadata,
+    ) -> io::Result<()>
+    where
+        N: AsRef<Path>,
+    {
+        let entry = generated_entry(
+            &checked(path.as_ref())?,
+            0,
+            EntryType::Directory,
+            metadata,
+            DEFAULT_DIRECTORY_MODE,
+        )?;
+        append_generated(self.get_mut(), entry, &[][..]).await
     }
 
     /// Adds a file on the local filesystem to this archive.
@@ -245,7 +320,8 @@ impl<W: Write + Unpin + Send> Builder<W> {
     pub async fn append_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
         let mode = self.mode;
         let follow = self.follow;
-        append_path_with_name(self.get_mut(), path.as_ref(), None, mode, follow).await?;
+        let name = checked(path.as_ref())?;
+        append_path_with_name(self.get_mut(), path.as_ref(), &name, mode, follow).await?;
         Ok(())
     }
 
@@ -278,21 +354,15 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn append_path_with_name<P: AsRef<Path>, N: AsRef<Path>>(
-        &mut self,
-        path: P,
-        name: N,
-    ) -> io::Result<()> {
+    pub async fn append_path_with_name<P, N>(&mut self, path: P, name: N) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        N: AsRef<Path>,
+    {
         let mode = self.mode;
         let follow = self.follow;
-        append_path_with_name(
-            self.get_mut(),
-            path.as_ref(),
-            Some(name.as_ref()),
-            mode,
-            follow,
-        )
-        .await?;
+        let name = checked(name.as_ref())?;
+        append_path_with_name(self.get_mut(), path.as_ref(), &name, mode, follow).await?;
         Ok(())
     }
 
@@ -326,13 +396,14 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn append_file<P: AsRef<Path>>(
+    pub async fn append_file<N: AsRef<Path>>(
         &mut self,
-        path: P,
+        path: N,
         file: &mut fs::File,
     ) -> io::Result<()> {
         let mode = self.mode;
-        append_file(self.get_mut(), path.as_ref(), file, mode).await?;
+        let path = checked(path.as_ref())?;
+        append_file(self.get_mut(), &path, file, mode).await?;
         Ok(())
     }
 
@@ -365,13 +436,14 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn append_dir<P, Q>(&mut self, path: P, src_path: Q) -> io::Result<()>
+    pub async fn append_dir<N, P>(&mut self, path: N, src_path: P) -> io::Result<()>
     where
+        N: AsRef<Path>,
         P: AsRef<Path>,
-        Q: AsRef<Path>,
     {
         let mode = self.mode;
-        append_dir(self.get_mut(), path.as_ref(), src_path.as_ref(), mode).await?;
+        let path = checked(path.as_ref())?;
+        append_dir(self.get_mut(), &path, src_path.as_ref(), mode).await?;
         Ok(())
     }
 
@@ -403,16 +475,19 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
-    pub async fn append_dir_all<P, Q>(&mut self, path: P, src_path: Q) -> io::Result<()>
+    pub async fn append_dir_all<N, P>(&mut self, path: N, src_path: P) -> io::Result<()>
     where
+        N: AsRef<Path>,
         P: AsRef<Path>,
-        Q: AsRef<Path>,
     {
         let mode = self.mode;
         let follow = self.follow;
+        let path = (!path.as_ref().as_os_str().is_empty())
+            .then(|| checked(path.as_ref()))
+            .transpose()?;
         append_dir_all(
             self.get_mut(),
-            path.as_ref(),
+            path.as_deref(),
             src_path.as_ref(),
             mode,
             follow,
@@ -438,10 +513,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     }
 }
 
-async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
+async fn append_entry<Dst: Write + Unpin + ?Sized, Data: Read + Unpin>(
     mut dst: &mut Dst,
     header: &Header,
-    mut data: &mut Data,
+    mut data: Data,
 ) -> io::Result<()> {
     dst.write_all(header.as_bytes()).await?;
     let len = io::copy(&mut data, &mut dst).await?;
@@ -456,10 +531,138 @@ async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
     Ok(())
 }
 
+const PAX_HEADER_PATH: &str = "PaxHeaders/pax-entry";
+const PAX_PAYLOAD_PATH: &str = "pax-entry";
+// A PAX-compliant reader ignores these canonical ASCII fallbacks when a
+// `linkpath` extension is present.
+const PAX_HARD_LINK_FALLBACK: &[u8] = b"pax-hard-link";
+const PAX_SYM_LINK_FALLBACK: &[u8] = b"pax-sym-link";
+
+type PaxExtensions = Vec<(&'static str, String)>;
+type GeneratedEntry = (Header, PaxExtensions);
+
+fn generated_entry(
+    path: &str,
+    size: u64,
+    entry_type: EntryType,
+    metadata: EntryMetadata,
+    default_mode: u32,
+) -> io::Result<GeneratedEntry> {
+    let mut header = Header::new_ustar();
+    metadata.apply(&mut header, default_mode);
+    header.set_size(size);
+    header.set_entry_type(entry_type);
+    let mut extensions = Vec::new();
+    prepare_header_path(&mut header, path, &mut extensions);
+    prepare_header_numeric_fields(&mut header, &mut extensions)?;
+    Ok((header, extensions))
+}
+
+async fn append_generated<Dst: Write + Unpin + ?Sized, Data: Read + Unpin>(
+    dst: &mut Dst,
+    (mut header, extensions): GeneratedEntry,
+    data: Data,
+) -> io::Result<()> {
+    append_pax_extensions(dst, &extensions).await?;
+    header.set_cksum();
+    append_entry(dst, &header, data).await
+}
+
+async fn append_pax_extensions<Dst: Write + Unpin + ?Sized>(
+    dst: &mut Dst,
+    extensions: &PaxExtensions,
+) -> io::Result<()> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
+
+    let mut data = Vec::new();
+    for (key, value) in extensions {
+        append_pax_record(&mut data, key, value);
+    }
+
+    let mut header = Header::new_ustar();
+    header.set_path(PAX_HEADER_PATH)?;
+    EntryMetadata::new().apply(&mut header, DEFAULT_FILE_MODE);
+    header.set_size(data.len() as u64);
+    header.set_entry_type(EntryType::XHeader);
+    header.set_cksum();
+
+    append_entry(dst, &header, &data[..]).await
+}
+
+fn append_pax_record(dst: &mut Vec<u8>, key: &str, value: &str) {
+    let record_content_len = key.len() + value.len() + 3;
+    let mut record_len = record_content_len + 1;
+    loop {
+        let next_len = record_content_len + record_len.to_string().len();
+        if next_len == record_len {
+            break;
+        }
+        record_len = next_len;
+    }
+
+    dst.extend_from_slice(record_len.to_string().as_bytes());
+    dst.push(b' ');
+    dst.extend_from_slice(key.as_bytes());
+    dst.push(b'=');
+    dst.extend_from_slice(value.as_bytes());
+    dst.push(b'\n');
+}
+
+fn prepare_header_path(header: &mut Header, path: &str, pax_extensions: &mut PaxExtensions) {
+    if !path.is_ascii() || header.set_path(path).is_err() {
+        let ustar = header.as_ustar_mut().expect("writer uses USTAR headers");
+        ustar.name.fill(0);
+        ustar.prefix.fill(0);
+        header.set_path(PAX_PAYLOAD_PATH).unwrap();
+        pax_extensions.push(("path", path.to_owned()));
+    }
+}
+
+fn prepare_header_link(
+    header: &mut Header,
+    pax_extensions: &mut PaxExtensions,
+    target: &str,
+    fallback: &[u8],
+) {
+    header.as_old_mut().linkname.fill(0);
+    if !target.is_ascii() || header.set_link_name(target).is_err() {
+        let linkname = &mut header.as_old_mut().linkname;
+        linkname.fill(0);
+        linkname[..fallback.len()].copy_from_slice(fallback);
+        pax_extensions.push(("linkpath", target.to_owned()));
+    }
+}
+
+fn prepare_header_numeric_fields(
+    header: &mut Header,
+    pax_extensions: &mut PaxExtensions,
+) -> io::Result<()> {
+    fn is_base256(field: &[u8]) -> bool {
+        field.first().is_some_and(|byte| byte & 0x80 != 0)
+    }
+
+    macro_rules! pax_field {
+        ($field:ident, $get:ident, $set:ident) => {
+            if is_base256(&header.as_old().$field) {
+                pax_extensions.push((stringify!($field), header.$get()?.to_string()));
+                header.$set(0);
+            }
+        };
+    }
+    pax_field!(size, entry_size, set_size);
+    pax_field!(uid, uid, set_uid);
+    pax_field!(gid, gid, set_gid);
+    pax_field!(mtime, mtime, set_mtime);
+
+    Ok(())
+}
+
 async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
-    name: Option<&Path>,
+    name: &str,
     mode: HeaderMode,
     follow: bool,
 ) -> io::Result<()> {
@@ -478,11 +681,10 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
             )
         })?
     };
-    let ar_name = name.unwrap_or(path);
     if stat.is_file() {
         append_fs(
             dst,
-            ar_name,
+            name,
             &stat,
             &mut fs::File::open(path).await?,
             mode,
@@ -491,24 +693,16 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
         .await?;
         Ok(())
     } else if stat.is_dir() {
-        append_fs(dst, ar_name, &stat, &mut io::empty(), mode, None).await?;
+        append_fs(dst, name, &stat, &mut io::empty(), mode, None).await?;
         Ok(())
     } else if stat.file_type().is_symlink() {
-        let link_name = fs::read_link(path).await?;
-        append_fs(
-            dst,
-            ar_name,
-            &stat,
-            &mut io::empty(),
-            mode,
-            Some(&link_name),
-        )
-        .await?;
+        let link_name = link_target(&fs::read_link(path).await?)?;
+        append_fs(dst, name, &stat, &mut io::empty(), mode, Some(&link_name)).await?;
         Ok(())
     } else {
         #[cfg(unix)]
         {
-            append_special(dst, path, &stat, mode).await
+            append_special(dst, name, &stat, mode).await
         }
         #[cfg(not(unix))]
         {
@@ -520,7 +714,7 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
 #[cfg(unix)]
 async fn append_special<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
-    path: &Path,
+    path: &str,
     stat: &Metadata,
     mode: HeaderMode,
 ) -> io::Result<()> {
@@ -530,10 +724,7 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     let entry_type;
     if file_type.is_socket() {
         // sockets can't be archived
-        return Err(other(&format!(
-            "{}: socket can not be archived",
-            path.display()
-        )));
+        return Err(other(&format!("{}: socket can not be archived", path)));
     } else if file_type.is_fifo() {
         entry_type = EntryType::Fifo;
     } else if file_type.is_char_device() {
@@ -541,12 +732,13 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     } else if file_type.is_block_device() {
         entry_type = EntryType::Block;
     } else {
-        return Err(other(&format!("{} has unknown file type", path.display())));
+        return Err(other(&format!("{} has unknown file type", path)));
     }
 
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     header.set_metadata_in_mode(stat, mode);
-    prepare_header_path(dst, &mut header, path).await?;
+    let mut pax_extensions = Vec::new();
+    prepare_header_path(&mut header, path, &mut pax_extensions);
 
     header.set_entry_type(entry_type);
     let dev_id = stat.rdev();
@@ -555,15 +747,13 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     header.set_device_major(dev_major as u32)?;
     header.set_device_minor(dev_minor as u32)?;
 
-    header.set_cksum();
-    dst.write_all(header.as_bytes()).await?;
-
-    Ok(())
+    prepare_header_numeric_fields(&mut header, &mut pax_extensions)?;
+    append_generated(dst, (header, pax_extensions), &[][..]).await
 }
 
 async fn append_file<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
-    path: &Path,
+    path: &str,
     file: &mut fs::File,
     mode: HeaderMode,
 ) -> io::Result<()> {
@@ -574,7 +764,7 @@ async fn append_file<Dst: Write + Unpin + ?Sized>(
 
 async fn append_dir<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
-    path: &Path,
+    path: &str,
     src_path: &Path,
     mode: HeaderMode,
 ) -> io::Result<()> {
@@ -583,106 +773,47 @@ async fn append_dir<Dst: Write + Unpin + ?Sized>(
     Ok(())
 }
 
-fn prepare_header(size: u64, entry_type: EntryType) -> Header {
-    let mut header = Header::new_gnu();
-    let name = b"././@LongLink";
-    header.as_gnu_mut().unwrap().name[..name.len()].clone_from_slice(&name[..]);
-    header.set_mode(0o644);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    // + 1 to be compliant with GNU tar
-    header.set_size(size + 1);
-    header.set_entry_type(entry_type);
-    header.set_cksum();
-    header
-}
-
-async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
-    dst: &mut Dst,
-    header: &mut Header,
-    path: &Path,
-) -> io::Result<()> {
-    // Try to encode the path directly in the header, but if it ends up not
-    // working (probably because it's too long) then try to use the GNU-specific
-    // long name extension by emitting an entry which indicates that it's the
-    // filename.
-    if let Err(e) = header.set_path(path) {
-        let data = path2bytes(path)?;
-        let max = header.as_old().name.len();
-        //  Since e isn't specific enough to let us know the path is indeed too
-        //  long, verify it first before using the extension.
-        if data.len() < max {
-            return Err(e);
-        }
-        let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
-        // null-terminated string
-        let mut data2 = data.chain(io::repeat(0).take(1));
-        append(dst, &header2, &mut data2).await?;
-
-        // Truncate the path to store in the header we're about to emit to
-        // ensure we've got something at least mentioned. Note that we use
-        // `str`-encoding to be compatible with Windows, but in general the
-        // entry in the header itself shouldn't matter too much since extraction
-        // doesn't look at it.
-        let truncated = match str::from_utf8(&data[..max]) {
-            Ok(s) => s,
-            Err(e) => str::from_utf8(&data[..e.valid_up_to()]).unwrap(),
-        };
-        header.set_truncated_path_for_gnu_header(truncated)?;
-    }
-    Ok(())
-}
-
-async fn prepare_header_link<Dst: Write + Unpin + ?Sized>(
-    dst: &mut Dst,
-    header: &mut Header,
-    link_name: &Path,
-) -> io::Result<()> {
-    // Same as previous function but for linkname
-    if let Err(e) = header.set_link_name(link_name) {
-        let data = path2bytes(link_name)?;
-        if data.len() < header.as_old().linkname.len() {
-            return Err(e);
-        }
-        let header2 = prepare_header(data.len() as u64, EntryType::GNULongLink);
-        let mut data2 = data.chain(io::repeat(0).take(1));
-        append(dst, &header2, &mut data2).await?;
-    }
-    Ok(())
-}
-
 async fn append_fs<Dst: Write + Unpin + ?Sized, R: Read + Unpin + ?Sized>(
     dst: &mut Dst,
-    path: &Path,
+    path: &str,
     meta: &Metadata,
     read: &mut R,
     mode: HeaderMode,
-    link_name: Option<&Path>,
+    link_name: Option<&str>,
 ) -> io::Result<()> {
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
+    let mut pax_extensions = Vec::new();
 
-    prepare_header_path(dst, &mut header, path).await?;
+    prepare_header_path(&mut header, path, &mut pax_extensions);
     header.set_metadata_in_mode(meta, mode);
     if let Some(link_name) = link_name {
-        prepare_header_link(dst, &mut header, link_name).await?;
+        prepare_header_link(
+            &mut header,
+            &mut pax_extensions,
+            link_name,
+            PAX_SYM_LINK_FALLBACK,
+        );
     }
-    header.set_cksum();
-    append(dst, &header, read).await?;
-
-    Ok(())
+    prepare_header_numeric_fields(&mut header, &mut pax_extensions)?;
+    append_generated(dst, (header, pax_extensions), read).await
 }
 
 async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
-    path: &Path,
+    path: Option<&str>,
     src_path: &Path,
     mode: HeaderMode,
     follow: bool,
 ) -> io::Result<()> {
     let mut stack = vec![(src_path.to_path_buf(), true, false)];
     while let Some((src, is_dir, is_symlink)) = stack.pop() {
-        let dest = path.join(src.strip_prefix(src_path).unwrap());
+        let relative = src.strip_prefix(src_path).unwrap();
+        let dest = match (path, relative.as_os_str().is_empty()) {
+            (Some(prefix), true) => Some(prefix.to_owned()),
+            (Some(prefix), false) => Some(checked(&Path::new(prefix).join(relative))?),
+            (None, true) => None,
+            (None, false) => Some(checked(relative)?),
+        };
 
         // In case of a symlink pointing to a directory, is_dir is false, but src.is_dir() will return true
         if is_dir || (is_symlink && follow && src.is_dir()) {
@@ -692,23 +823,32 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
                 let file_type = entry.file_type().await?;
                 stack.push((entry.path(), file_type.is_dir(), file_type.is_symlink()));
             }
-            if dest != Path::new("") {
-                append_dir(dst, &dest, &src, mode).await?;
+            if let Some(dest) = &dest {
+                append_dir(dst, dest, &src, mode).await?;
             }
         } else if !follow && is_symlink {
             let stat = fs::symlink_metadata(&src).await?;
-            let link_name = fs::read_link(&src).await?;
-            append_fs(dst, &dest, &stat, &mut io::empty(), mode, Some(&link_name)).await?;
+            let link_name = link_target(&fs::read_link(&src).await?)?;
+            append_fs(
+                dst,
+                dest.as_ref().expect("recursive child has an archive name"),
+                &stat,
+                &mut io::empty(),
+                mode,
+                Some(&link_name),
+            )
+            .await?;
         } else {
+            let dest = dest.as_ref().expect("recursive child has an archive name");
             #[cfg(unix)]
             {
                 let stat = fs::metadata(&src).await?;
                 if !stat.is_file() {
-                    append_special(dst, &dest, &stat, mode).await?;
+                    append_special(dst, dest, &stat, mode).await?;
                     continue;
                 }
             }
-            append_file(dst, &dest, &mut fs::File::open(src).await?, mode).await?;
+            append_file(dst, dest, &mut fs::File::open(src).await?, mode).await?;
         }
     }
     Ok(())

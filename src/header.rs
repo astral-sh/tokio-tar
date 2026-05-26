@@ -388,16 +388,6 @@ impl Header {
         self.set_path_inner(p.as_ref(), false)
     }
 
-    // Sets the truncated path for GNU header
-    //
-    // Same as set_path but skips some validations.
-    pub(crate) fn set_truncated_path_for_gnu_header<P: AsRef<Path>>(
-        &mut self,
-        p: P,
-    ) -> std::io::Result<()> {
-        self.set_path_inner(p.as_ref(), true)
-    }
-
     fn set_path_inner(
         &mut self,
         path: &Path,

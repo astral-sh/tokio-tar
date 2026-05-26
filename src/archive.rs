@@ -18,7 +18,8 @@ use tokio_stream::*;
 use crate::{
     entry::{EntryFields, EntryIo},
     error::TarError,
-    other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
+    header::GnuExtSparseHeader,
+    other, Entry, GnuSparseHeader, Header,
 };
 use crate::{header::BLOCK_SIZE, pax::pax_extensions};
 
@@ -648,6 +649,14 @@ fn poll_next_raw<R: Read + Unpin>(
                             .parse::<u64>()
                             .map_err(|_e| other("failed to parse pax gid"))?,
                     );
+                }
+
+                "mtime" => {
+                    if let Ok(mtime_str) = extension.value() {
+                        if let Ok(mtime) = mtime_str.parse::<u64>() {
+                            header.set_mtime(mtime);
+                        }
+                    }
                 }
 
                 _ => {

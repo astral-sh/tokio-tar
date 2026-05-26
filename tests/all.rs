@@ -11,11 +11,11 @@ use std::{
 };
 use tokio::{
     fs::{self, File},
-    io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{self, AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
 use tokio_stream::*;
 
-use async_tar::{Archive, ArchiveBuilder, Builder, EntryType, Header};
+use async_tar::{Archive, ArchiveBuilder, Builder, EntryMetadata, EntryType, Header};
 use tempfile::{Builder as TempBuilder, TempDir};
 
 macro_rules! t {
@@ -31,6 +31,55 @@ macro_rules! tar {
     ($e:expr) => {
         &include_bytes!(concat!("archives/", $e))[..]
     };
+}
+
+fn raw_header(mut header: Header, path: &[u8], entry_type: u8, size: u64) -> Header {
+    header.as_old_mut().name[..path.len()].copy_from_slice(path);
+    header.set_entry_type(EntryType::new(entry_type));
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_size(size);
+    header.set_cksum();
+    header
+}
+
+fn raw_old_header(path: &[u8], entry_type: u8, size: u64) -> Header {
+    raw_header(Header::new_old(), path, entry_type, size)
+}
+
+fn raw_ustar_header(path: &[u8], entry_type: u8, size: u64) -> Header {
+    raw_header(Header::new_ustar(), path, entry_type, size)
+}
+
+fn append_raw(bytes: &mut Vec<u8>, header: &Header, data: &[u8]) {
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(data);
+    let padding = (512 - data.len() % 512) % 512;
+    bytes.extend_from_slice(&vec![0; padding]);
+}
+
+async fn pax_payload(contents: &[u8], payload_path: &[u8]) -> (Vec<(String, String)>, Header) {
+    let mut raw = Archive::new(contents);
+    let mut entries = t!(raw.entries_raw());
+    let mut pax = t!(entries.next().await.unwrap());
+    assert!(pax.header().entry_type().is_pax_local_extensions());
+    assert!(pax.header().as_ustar().is_some());
+    assert!(pax.header().as_gnu().is_none());
+    let mut records = Vec::new();
+    for extension in t!(pax.pax_extensions().await).unwrap() {
+        let extension = t!(extension);
+        records.push((
+            t!(extension.key()).to_owned(),
+            t!(extension.value()).to_owned(),
+        ));
+    }
+    let payload = t!(entries.next().await.unwrap()).header().clone();
+    assert!(payload.as_ustar().is_some());
+    assert!(payload.as_gnu().is_none());
+    assert_eq!(&*payload.path_bytes(), payload_path);
+    assert!(entries.next().await.is_none());
+    (records, payload)
 }
 
 mod header;
@@ -167,6 +216,153 @@ async fn writing_files() {
 }
 
 #[tokio::test]
+async fn append_data_long_path_uses_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let long = "path".repeat(200);
+
+    t!(ar.append_data(&long, 4, "data".as_bytes()).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(records, vec![("path".to_owned(), long.clone())]);
+    assert!(!payload.entry_type().is_gnu_longname());
+}
+
+#[tokio::test]
+async fn append_data_short_non_ascii_path_uses_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let path = "caf\u{e9}.txt";
+
+    t!(ar.append_data(path, 0, &[][..]).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, _) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(records, vec![("path".to_owned(), path.to_owned())]);
+
+    let mut decoded = Archive::new(&contents[..]);
+    let mut entries = t!(decoded.entries());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.path_bytes()), path.as_bytes());
+}
+
+#[tokio::test]
+async fn append_data_rejects_control_paths() {
+    for path in [
+        "control-\u{1}.txt",
+        "tab\tpath",
+        "delete-\u{7f}.txt",
+        "c1-\u{85}.txt",
+    ] {
+        let mut ar = Builder::new(Vec::new());
+
+        let err = ar.append_data(path, 0, &[][..]).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Unicode control characters"),
+            "{err}"
+        );
+        assert!(ar.get_ref().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn append_data_numeric_overflows_use_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let path = "numeric-overflow-path".repeat(30);
+    let uid = 2_097_152 + 7;
+    let gid = 2_097_152 + 9;
+    let mtime = 8_589_934_592 + 11;
+    let metadata = EntryMetadata::new().uid(uid).gid(gid).mtime(mtime);
+
+    t!(ar
+        .append_data_with_metadata(&path, 0, metadata, &[][..])
+        .await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(
+        records,
+        vec![
+            ("path".to_owned(), path.clone()),
+            ("uid".to_owned(), uid.to_string()),
+            ("gid".to_owned(), gid.to_string()),
+            ("mtime".to_owned(), mtime.to_string()),
+        ]
+    );
+
+    assert_eq!(t!(payload.uid()), 0);
+    assert_eq!(t!(payload.gid()), 0);
+    assert_eq!(t!(payload.mtime()), 0);
+
+    let mut decoded = Archive::new(&contents[..]);
+    let mut entries = t!(decoded.entries());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.path_bytes()), path.as_bytes());
+    assert_eq!(t!(entry.header().uid()), uid);
+    assert_eq!(t!(entry.header().gid()), gid);
+    assert_eq!(t!(entry.header().mtime()), mtime);
+}
+
+#[tokio::test]
+async fn append_data_numeric_ustar_limits_do_not_use_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let uid = 2_097_151;
+    let gid = 2_097_151;
+    let mtime = 8_589_934_591;
+    let metadata = EntryMetadata::new().uid(uid).gid(gid).mtime(mtime);
+
+    t!(ar
+        .append_data_with_metadata("limits", 0, metadata, &[][..])
+        .await);
+
+    let contents = t!(ar.into_inner().await);
+    let mut raw = Archive::new(&contents[..]);
+    let mut entries = t!(raw.entries_raw());
+    let payload = t!(entries.next().await.unwrap());
+    assert!(payload.header().entry_type().is_file());
+    assert_eq!(t!(payload.header().uid()), uid);
+    assert_eq!(t!(payload.header().gid()), gid);
+    assert_eq!(t!(payload.header().mtime()), mtime);
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn append_data_size_overflow_uses_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let size = 8_589_934_592;
+
+    t!(ar.append_data("sized", size, &[][..]).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"sized").await;
+    assert_eq!(records, vec![("size".to_owned(), size.to_string())]);
+    assert_eq!(t!(payload.entry_size()), 0);
+}
+
+#[tokio::test]
+async fn generated_entries_have_conventional_default_modes() {
+    let mut ar = Builder::new(Vec::new());
+    t!(ar.append_data("file", 0, &[][..]).await);
+    t!(ar.append_directory("directory").await);
+    t!(ar.append_hard_link("hard-link", "file").await);
+    t!(ar.append_symlink("symlink", "file").await);
+    t!(ar
+        .append_data_with_metadata("metadata-file", 0, EntryMetadata::new().mtime(42), &[][..])
+        .await);
+
+    let contents = t!(ar.into_inner().await);
+    let mut ar = Archive::new(&contents[..]);
+    let mut entries = t!(ar.entries());
+    assert_eq!(t!(t!(entries.next().await.unwrap()).header().mode()), 0o644);
+    assert_eq!(t!(t!(entries.next().await.unwrap()).header().mode()), 0o755);
+    assert_eq!(t!(t!(entries.next().await.unwrap()).header().mode()), 0o644);
+    assert_eq!(t!(t!(entries.next().await.unwrap()).header().mode()), 0o777);
+    let metadata_file = t!(entries.next().await.unwrap());
+    assert_eq!(t!(metadata_file.header().mode()), 0o644);
+    assert_eq!(t!(metadata_file.header().mtime()), 42);
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn large_filename() {
     let mut ar = Builder::new(Vec::new());
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
@@ -177,22 +373,18 @@ async fn large_filename() {
     t!(file.flush().await);
 
     let filename = "abcd/".repeat(50);
-    let mut header = Header::new_ustar();
-    header.set_path(&filename).unwrap();
-    header.set_metadata(&t!(fs::metadata(&path).await));
-    header.set_cksum();
-    t!(ar.append(&header, &b"test"[..]).await);
+    t!(ar.append_data(&filename, 4, &b"test"[..]).await);
     let too_long = "abcd".repeat(200);
     t!(ar
         .append_file(&too_long, &mut t!(File::open(&path).await))
         .await);
-    t!(ar.append_data(&mut header, &too_long, &b"test"[..]).await);
+    t!(ar.append_data(&too_long, 4, &b"test"[..]).await);
 
     let rd = Cursor::new(t!(ar.into_inner().await));
     let mut ar = Archive::new(rd);
     let mut entries = t!(ar.entries());
 
-    // The short entry added with `append`
+    // The directly representable generated entry
     let mut f = entries.next().await.unwrap().unwrap();
     assert_eq!(&*f.header().path_bytes(), filename.as_bytes());
     assert_eq!(f.header().size().unwrap(), 4);
@@ -227,15 +419,11 @@ async fn large_filename() {
 async fn large_filename_with_dot_dot_at_100_byte_mark() {
     let mut ar = Builder::new(Vec::new());
 
-    let mut header = Header::new_gnu();
-    header.set_mode(0o644);
-    header.set_size(4);
-
     let mut long_name_with_dot_dot = "tdir/".repeat(19);
     long_name_with_dot_dot.push_str("tt/..file");
 
     t!(ar
-        .append_data(&mut header, &long_name_with_dot_dot, b"test".as_slice())
+        .append_data(&long_name_with_dot_dot, 4, b"test".as_slice())
         .await);
 
     let rd = Cursor::new(t!(ar.into_inner().await));
@@ -549,17 +737,13 @@ async fn extracting_duplicate_dirs() {
 async fn unpack_old_style_bsd_dir() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
-    let mut ar = Builder::new(Vec::new());
-
-    let mut header = Header::new_old();
-    header.set_entry_type(EntryType::Regular);
-    t!(header.set_path("testdir/"));
-    header.set_size(0);
-    header.set_cksum();
-    t!(ar.append(&header, &mut io::empty()).await);
+    let mut bytes = Vec::new();
+    let header = raw_old_header(b"testdir/", b'0', 0);
+    append_raw(&mut bytes, &header, &[]);
+    bytes.extend_from_slice(&[0; 1024]);
 
     // Extracting
-    let rdr = Cursor::new(t!(ar.into_inner().await));
+    let rdr = Cursor::new(bytes);
     let mut ar = Archive::new(rdr);
     t!(ar.unpack(td.path()).await);
 
@@ -586,12 +770,7 @@ async fn handling_incorrect_file_size() {
     t!(file.write_all(b"").await);
     t!(file.flush().await);
     let mut file = t!(File::open(&path).await);
-    let mut header = Header::new_old();
-    t!(header.set_path("somepath"));
-    header.set_metadata(&t!(file.metadata().await));
-    header.set_size(2048); // past the end of file null blocks
-    header.set_cksum();
-    t!(ar.append(&header, &mut file).await);
+    t!(ar.append_data("somepath", 2048, &mut file).await); // past the end of file null blocks
 
     // Extracting
     let rdr = Cursor::new(t!(ar.into_inner().await));
@@ -617,52 +796,41 @@ async fn extracting_malicious_tarball() {
     let mut evil_tar = Vec::new();
 
     evil_tar = {
-        let mut a = Builder::new(evil_tar);
-        async fn append<R: AsyncWrite + Send + Unpin>(a: &mut Builder<R>, path: &'static str) {
-            let mut header = Header::new_gnu();
-            assert!(header.set_path(path).is_err(), "was ok: {:?}", path);
-            {
-                let h = header.as_gnu_mut().unwrap();
-                for (a, b) in h.name.iter_mut().zip(path.as_bytes()) {
-                    *a = *b;
-                }
-            }
-            header.set_size(1);
-            header.set_cksum();
-            t!(a.append(&header, io::repeat(1).take(1)).await);
+        fn append(a: &mut Vec<u8>, path: &'static str) {
+            let header = raw_ustar_header(path.as_bytes(), b'0', 1);
+            append_raw(a, &header, &[1]);
         }
 
-        append(&mut a, "/tmp/abs_evil.txt").await;
+        append(&mut evil_tar, "/tmp/abs_evil.txt");
         // std parse `//` as UNC path, see rust-lang/rust#100833
         append(
-            &mut a,
+            &mut evil_tar,
             #[cfg(not(windows))]
             "//tmp/abs_evil2.txt",
             #[cfg(windows)]
             "C://tmp/abs_evil2.txt",
-        )
-        .await;
-        append(&mut a, "///tmp/abs_evil3.txt").await;
-        append(&mut a, "/./tmp/abs_evil4.txt").await;
+        );
+        append(&mut evil_tar, "///tmp/abs_evil3.txt");
+        append(&mut evil_tar, "/./tmp/abs_evil4.txt");
         append(
-            &mut a,
+            &mut evil_tar,
             #[cfg(not(windows))]
             "//./tmp/abs_evil5.txt",
             #[cfg(windows)]
             "C://./tmp/abs_evil5.txt",
-        )
-        .await;
-        append(&mut a, "///./tmp/abs_evil6.txt").await;
-        append(&mut a, "/../tmp/rel_evil.txt").await;
-        append(&mut a, "../rel_evil2.txt").await;
-        append(&mut a, "./../rel_evil3.txt").await;
-        append(&mut a, "some/../../rel_evil4.txt").await;
-        append(&mut a, "").await;
-        append(&mut a, "././//./..").await;
-        append(&mut a, "..").await;
-        append(&mut a, "/////////..").await;
-        append(&mut a, "/////////").await;
-        a.into_inner().await.unwrap()
+        );
+        append(&mut evil_tar, "///./tmp/abs_evil6.txt");
+        append(&mut evil_tar, "/../tmp/rel_evil.txt");
+        append(&mut evil_tar, "../rel_evil2.txt");
+        append(&mut evil_tar, "./../rel_evil3.txt");
+        append(&mut evil_tar, "some/../../rel_evil4.txt");
+        append(&mut evil_tar, "");
+        append(&mut evil_tar, "././//./..");
+        append(&mut evil_tar, "..");
+        append(&mut evil_tar, "/////////..");
+        append(&mut evil_tar, "/////////");
+        evil_tar.extend_from_slice(&[0; 1024]);
+        evil_tar
     };
 
     let mut ar = Archive::new(&evil_tar[..]);
@@ -819,16 +987,10 @@ async fn backslash_treated_well() {
     }
 
     // Unpack an archive with a backslash in the name
-    let mut ar = Builder::new(Vec::<u8>::new());
-    let mut header = Header::new_gnu();
-    header.set_metadata(&t!(fs::metadata(td.path()).await));
-    header.set_size(0);
-    for (a, b) in header.as_old_mut().name.iter_mut().zip(b"foo\\bar\x00") {
-        *a = *b;
-    }
-    header.set_cksum();
-    t!(ar.append(&header, &mut io::empty()).await);
-    let data = t!(ar.into_inner().await);
+    let mut data = Vec::new();
+    let header = raw_ustar_header(b"foo\\bar", b'0', 0);
+    append_raw(&mut data, &header, &[]);
+    data.extend_from_slice(&[0; 1024]);
     let mut ar = Archive::new(&data[..]);
     let f = t!(t!(ar.entries()).next().await.unwrap());
     assert_eq!(t!(f.header().path()).to_str(), Some("foo\\bar"));
@@ -847,7 +1009,7 @@ async fn nul_bytes_in_path() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let mut ar = Builder::new(Vec::<u8>::new());
     let err = ar.append_dir(nul_path, td.path()).await.unwrap_err();
-    assert!(err.to_string().contains("contains a nul byte"));
+    assert!(err.to_string().contains("Unicode control characters"));
 }
 
 #[tokio::test]
@@ -994,21 +1156,11 @@ async fn pax_precedence() {
 
 #[tokio::test]
 async fn long_name_trailing_nul() {
-    let mut b = Builder::new(Vec::<u8>::new());
-
-    let mut h = Header::new_gnu();
-    t!(h.set_path("././@LongLink"));
-    h.set_size(4);
-    h.set_entry_type(EntryType::new(b'L'));
-    h.set_cksum();
-    t!(b.append(&h, b"foo\0" as &[u8]).await);
-    let mut h = Header::new_gnu();
-
-    t!(h.set_path("bar"));
-    h.set_size(6);
-    h.set_entry_type(EntryType::file());
-    h.set_cksum();
-    t!(b.append(&h, b"foobar" as &[u8]).await);
+    let mut bytes = Vec::new();
+    let h = raw_ustar_header(b"././@LongLink", b'L', 4);
+    append_raw(&mut bytes, &h, b"foo\0");
+    let mut b = Builder::new(bytes);
+    t!(b.append_data("bar", 6, b"foobar" as &[u8]).await);
 
     let contents = t!(b.into_inner().await);
     let mut a = Archive::new(&contents[..]);
@@ -1019,21 +1171,11 @@ async fn long_name_trailing_nul() {
 
 #[tokio::test]
 async fn long_linkname_trailing_nul() {
-    let mut b = Builder::new(Vec::<u8>::new());
-
-    let mut h = Header::new_gnu();
-    t!(h.set_path("././@LongLink"));
-    h.set_size(4);
-    h.set_entry_type(EntryType::new(b'K'));
-    h.set_cksum();
-    t!(b.append(&h, b"foo\0" as &[u8]).await);
-    let mut h = Header::new_gnu();
-
-    t!(h.set_path("bar"));
-    h.set_size(6);
-    h.set_entry_type(EntryType::file());
-    h.set_cksum();
-    t!(b.append(&h, b"foobar" as &[u8]).await);
+    let mut bytes = Vec::new();
+    let h = raw_ustar_header(b"././@LongLink", b'K', 4);
+    append_raw(&mut bytes, &h, b"foo\0");
+    let mut b = Builder::new(bytes);
+    t!(b.append_data("bar", 6, b"foobar" as &[u8]).await);
 
     let contents = t!(b.into_inner().await);
     let mut a = Archive::new(&contents[..]);
@@ -1043,7 +1185,7 @@ async fn long_linkname_trailing_nul() {
 }
 
 #[tokio::test]
-async fn encoded_long_name_has_trailing_nul() {
+async fn encoded_long_name_uses_pax() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let path = td.path().join("foo");
     t!(t!(File::create(&path).await).write_all(b"test").await);
@@ -1059,10 +1201,11 @@ async fn encoded_long_name_has_trailing_nul() {
     let mut e = t!(t!(a.entries_raw()).next().await.unwrap());
     let mut name = Vec::new();
     t!(e.read_to_end(&mut name).await);
-    assert_eq!(name[name.len() - 1], 0);
-
-    let header_name = &e.header().as_gnu().unwrap().name;
-    assert!(header_name.starts_with(b"././@LongLink\x00"));
+    assert!(e.header().as_ustar().is_some());
+    assert!(e.header().as_gnu().is_none());
+    assert!(e.header().entry_type().is_pax_local_extensions());
+    assert!(name.starts_with(b"810 path="));
+    assert_eq!(name[name.len() - 1], b'\n');
 }
 
 #[tokio::test]
@@ -1201,19 +1344,8 @@ async fn path_separators() {
     let short_path: PathBuf = std::iter::repeat_n("abcd", 2).collect();
     let long_path: PathBuf = std::iter::repeat_n("abcd", 50).collect();
 
-    // Make sure UStar headers normalize to Unix path separators
-    let mut header = Header::new_ustar();
-
-    t!(header.set_path(&short_path));
-    assert_eq!(t!(header.path()), short_path);
-    assert!(!header.path_bytes().contains(&b'\\'));
-
-    t!(header.set_path(&long_path));
-    assert_eq!(t!(header.path()), long_path);
-    assert!(!header.path_bytes().contains(&b'\\'));
-
-    // Make sure GNU headers normalize to Unix path separators,
-    // including the `@LongLink` fallback used by `append_file`.
+    // Make sure builder output normalizes to Unix path separators,
+    // including the PAX fallback used by `append_file`.
     t!(ar
         .append_file(&short_path, &mut t!(File::open(&path).await))
         .await);
@@ -1290,24 +1422,156 @@ async fn append_path_symlink() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn append_path_long_symlink_uses_pax() {
+    use std::os::unix::fs::symlink;
+
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let source = td.path().join("source");
+    let archive_path = "symlink-path".repeat(30);
+    let target = "link-target".repeat(20);
+    t!(symlink(&target, &source));
+
+    let mut ar = Builder::new(Vec::new());
+    ar.follow_symlinks(false);
+    t!(ar.append_path_with_name(&source, &archive_path).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(
+        records,
+        vec![
+            ("path".to_owned(), archive_path),
+            ("linkpath".to_owned(), target),
+        ]
+    );
+
+    assert!(!payload.entry_type().is_gnu_longlink());
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-sym-link");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn append_path_rejects_non_utf8_derived_name_before_writing() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let source = td.path().join(OsStr::from_bytes(b"invalid-\xff"));
+
+    let mut ar = Builder::new(Vec::new());
+    assert!(ar.append_path(&source).await.is_err());
+    assert!(ar.get_ref().is_empty());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn append_dir_all_errors_at_invalid_derived_name_after_prior_entry() {
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let source = td.path().join("source");
+    t!(fs::create_dir(&source).await);
+    t!(File::create(source.join("invalid-\n")).await);
+
+    let mut ar = Builder::new(Vec::new());
+    assert!(ar.append_dir_all("archive", &source).await.is_err());
+    assert!(!ar.get_ref().is_empty());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn append_dir_all_errors_at_invalid_symlink_target_after_prior_entry() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, os::unix::fs::symlink};
+
+    let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
+    let source = td.path().join("source");
+    t!(fs::create_dir(&source).await);
+    t!(symlink(
+        OsStr::from_bytes(b"invalid-\xff"),
+        source.join("invalid-link")
+    ));
+
+    let mut ar = Builder::new(Vec::new());
+    ar.follow_symlinks(false);
+    assert!(ar.append_dir_all("archive", &source).await.is_err());
+    assert!(!ar.get_ref().is_empty());
+}
+
+#[tokio::test]
+async fn append_hard_link_long_values_use_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let archive_path = "hardlink-path".repeat(30);
+    let target = "hardlink-target".repeat(20);
+    t!(ar.append_hard_link(&archive_path, &target).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(
+        records,
+        vec![
+            ("path".to_owned(), archive_path),
+            ("linkpath".to_owned(), target),
+        ]
+    );
+
+    assert!(payload.entry_type().is_hard_link());
+    assert_eq!(t!(payload.size()), 0);
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-hard-link");
+}
+
+#[tokio::test]
+async fn append_symlink_short_non_ascii_values_use_pax() {
+    let mut ar = Builder::new(Vec::new());
+    let archive_path = "l\u{ed}nk";
+    let target = "targ\u{e9}t";
+    t!(ar.append_symlink(archive_path, target).await);
+
+    let contents = t!(ar.into_inner().await);
+    let (records, payload) = pax_payload(&contents, b"pax-entry").await;
+    assert_eq!(
+        records,
+        vec![
+            ("path".to_owned(), archive_path.to_owned()),
+            ("linkpath".to_owned(), target.to_owned()),
+        ]
+    );
+
+    assert!(payload.entry_type().is_symlink());
+    assert_eq!(t!(payload.size()), 0);
+    assert_eq!(&*payload.link_name_bytes().unwrap(), b"pax-sym-link");
+
+    let mut decoded = Archive::new(&contents[..]);
+    let mut entries = t!(decoded.entries());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.path_bytes()), archive_path.as_bytes());
+    assert_eq!(&*t!(entry.link_name_bytes()).unwrap(), target.as_bytes());
+}
+
+#[tokio::test]
+async fn append_symlink_rejects_control_values_before_writing() {
+    for (path, target) in [
+        ("link-\t", "target"),
+        ("link", "target-\u{1}"),
+        ("link", "target-\u{85}"),
+    ] {
+        let mut ar = Builder::new(Vec::new());
+        let err = ar.append_symlink(path, target).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Unicode control characters"),
+            "{err}"
+        );
+        assert!(ar.get_ref().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn name_with_slash_doesnt_fool_long_link_and_bsd_compat() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
 
-    let mut ar = Builder::new(Vec::new());
+    let mut bytes = Vec::new();
+    let h = raw_ustar_header(b"././@LongLink", b'L', 4);
+    append_raw(&mut bytes, &h, b"foo\0");
+    let mut ar = Builder::new(bytes);
 
-    let mut h = Header::new_gnu();
-    t!(h.set_path("././@LongLink"));
-    h.set_size(4);
-    h.set_entry_type(EntryType::new(b'L'));
-    h.set_cksum();
-    t!(ar.append(&h, b"foo\0" as &[u8]).await);
-
-    let mut header = Header::new_gnu();
-    header.set_entry_type(EntryType::Regular);
-    t!(header.set_path("testdir/"));
-    header.set_size(0);
-    header.set_cksum();
-    t!(ar.append(&header, &mut io::empty()).await);
+    t!(ar.append_data("testdir/", 0, &mut io::empty()).await);
 
     // Extracting
     let rdr = Cursor::new(t!(ar.into_inner().await));
@@ -1398,9 +1662,7 @@ async fn append_long_multibyte() {
     for _ in 0..512 {
         name.push('a');
         name.push('𑢮');
-        x.append_data(&mut Header::new_gnu(), &name, data)
-            .await
-            .unwrap();
+        x.append_data(&name, 0, data).await.unwrap();
         name.pop();
     }
 }
@@ -1411,20 +1673,11 @@ async fn read_only_directory_containing_files() {
 
     let mut b = Builder::new(Vec::<u8>::new());
 
-    let mut h = Header::new_gnu();
-    t!(h.set_path("dir/"));
-    h.set_size(0);
-    h.set_entry_type(EntryType::dir());
-    h.set_mode(0o444);
-    h.set_cksum();
-    t!(b.append(&h, "".as_bytes()).await);
-
-    let mut h = Header::new_gnu();
-    t!(h.set_path("dir/file"));
-    h.set_size(2);
-    h.set_entry_type(EntryType::file());
-    h.set_cksum();
-    t!(b.append(&h, "hi".as_bytes()).await);
+    t!(
+        b.append_directory_with_metadata("dir/", EntryMetadata::new().mode(0o444))
+            .await
+    );
+    t!(b.append_data("dir/file", 2, "hi".as_bytes()).await);
 
     let contents = t!(b.into_inner().await);
     let mut ar = Archive::new(&contents[..]);
@@ -1458,18 +1711,31 @@ async fn tar_directory_containing_special_files() {
     t!(env::set_current_dir("/dev/"));
     // CI systems seem to have issues with creating a chr device
     t!(ar.append_path("null").await);
-    t!(ar.finish().await);
+
+    let contents = t!(ar.into_inner().await);
+    let mut raw = Archive::new(&contents[..]);
+    let mut entries = t!(raw.entries_raw());
+    let mut entry_count = 0;
+    while let Some(entry) = entries.next().await {
+        let entry = t!(entry);
+        let header = entry.header();
+        let entry_type = header.entry_type();
+        assert!(header.as_ustar().is_some());
+        assert!(header.as_gnu().is_none());
+        assert!(!entry_type.is_gnu_longname());
+        assert!(!entry_type.is_gnu_longlink());
+        assert!(!entry_type.is_gnu_sparse());
+        entry_count += 1;
+    }
+    assert!(entry_count >= 3);
 }
 
 #[tokio::test]
 async fn header_size_overflow() {
     // maximal file size doesn't overflow anything
-    let mut ar = Builder::new(Vec::new());
-    let mut header = Header::new_gnu();
-    header.set_size(u64::MAX);
-    header.set_cksum();
-    t!(ar.append(&header, "x".as_bytes()).await);
-    let result = t!(ar.into_inner().await);
+    let mut result = Vec::new();
+    let header = raw_ustar_header(b"overflow", b'0', u64::MAX);
+    append_raw(&mut result, &header, b"x");
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let entry = e.next().await.unwrap();
@@ -1482,16 +1748,11 @@ async fn header_size_overflow() {
     );
 
     // back-to-back entries that would overflow also don't panic
-    let mut ar = Builder::new(Vec::new());
-    let mut header = Header::new_gnu();
-    header.set_size(1_000);
-    header.set_cksum();
-    t!(ar.append(&header, &[0u8; 1_000][..]).await);
-    let mut header = Header::new_gnu();
-    header.set_size(u64::MAX - 513);
-    header.set_cksum();
-    t!(ar.append(&header, "x".as_bytes()).await);
-    let result = t!(ar.into_inner().await);
+    let mut result = Vec::new();
+    let first_header = raw_ustar_header(b"first", b'0', 1_000);
+    append_raw(&mut result, &first_header, &[0u8; 1_000]);
+    let header = raw_ustar_header(b"overflow", b'0', u64::MAX - 513);
+    append_raw(&mut result, &header, b"x");
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let first = e.next().await.unwrap();

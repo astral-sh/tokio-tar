@@ -177,12 +177,12 @@ impl EntryType {
         self == EntryType::GNULongLink
     }
 
-    /// Returns whether this type represents a GNU long name header.
+    /// Returns whether this type represents a PAX global extension header.
     pub fn is_pax_global_extensions(self) -> bool {
         self == EntryType::XGlobalHeader
     }
 
-    /// Returns whether this type represents a GNU long link header.
+    /// Returns whether this type represents a PAX local extension header.
     pub fn is_pax_local_extensions(self) -> bool {
         self == EntryType::XHeader
     }
