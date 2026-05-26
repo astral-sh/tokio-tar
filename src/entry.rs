@@ -2,7 +2,6 @@ use crate::fs::normalize;
 use crate::{
     error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
 };
-use filetime::{self, FileTime};
 use rustc_hash::FxHashSet;
 use std::{
     borrow::Cow,
@@ -10,17 +9,83 @@ use std::{
     collections::VecDeque,
     convert::TryFrom,
     fmt,
+    fs::FileTimes,
     io::{Error, ErrorKind, SeekFrom},
     marker,
     path::{Component, Path, PathBuf},
     pin::Pin,
     task::{Context, Poll},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
     fs::{remove_file, OpenOptions},
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
+
+fn set_file_times(file: &std::fs::File, mtime: SystemTime) -> io::Result<()> {
+    file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
+}
+
+#[cfg(windows)]
+fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dst)?;
+    set_file_times(&file, mtime)
+}
+
+#[cfg(target_os = "redox")]
+fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dst)?;
+    set_file_times(&file, mtime)
+}
+
+#[cfg(all(unix, not(any(target_os = "redox", target_os = "emscripten"))))]
+fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
+    use rustix::fs::{utimensat, AtFlags, Timespec, Timestamps, CWD};
+
+    let duration = mtime
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime predates the Unix epoch"))?;
+    let seconds = duration
+        .as_secs()
+        .try_into()
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime exceeds platform limits"))?;
+    let nanoseconds = duration.subsec_nanos().into();
+    let timestamps = Timestamps {
+        last_access: Timespec {
+            tv_sec: seconds,
+            tv_nsec: nanoseconds,
+        },
+        last_modification: Timespec {
+            tv_sec: seconds,
+            tv_nsec: nanoseconds,
+        },
+    };
+    utimensat(CWD, dst, &timestamps, AtFlags::SYMLINK_NOFOLLOW).map_err(Into::into)
+}
+
+#[cfg(any(all(unix, target_os = "emscripten"), all(not(unix), not(windows))))]
+fn set_symlink_file_times(_: &Path, _: SystemTime) -> io::Result<()> {
+    // NOTE: This imitates `filetime`, which explicitly fails on these platforms.
+    // See: <https://docs.rs/crate/filetime/0.2.29/source/src/wasm.rs#7>
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "setting timestamps on symlinks is not supported on this platform",
+    ))
+}
 
 /// A read-only view into an entry of an archive.
 ///
@@ -582,17 +647,22 @@ impl<R: Read + Unpin> EntryFields<R> {
 
     /// Returns access to the header of this entry in the archive.
     async fn unpack(&mut self, target_base: Option<&Path>, dst: &Path) -> io::Result<Unpacked> {
-        fn get_mtime(header: &Header) -> Option<FileTime> {
-            header.mtime().ok().map(|mtime| {
-                // For some more information on this see the comments in
-                // `Header::fill_platform_from`, but the general idea is that
-                // we're trying to avoid 0-mtime files coming out of archives
-                // since some tools don't ingest them well. Perhaps one day
-                // when Cargo stops working with 0-mtime archives we can remove
-                // this.
-                let mtime = if mtime == 0 { 1 } else { mtime };
-                FileTime::from_unix_time(mtime as i64, 0)
-            })
+        fn get_mtime(header: &Header) -> io::Result<Option<SystemTime>> {
+            let Ok(mtime) = header.mtime() else {
+                return Ok(None);
+            };
+
+            // For some more information on this see the comments in
+            // `Header::fill_platform_from`, but the general idea is that
+            // we're trying to avoid 0-mtime files coming out of archives
+            // since some tools don't ingest them well. Perhaps one day
+            // when Cargo stops working with 0-mtime archives we can remove
+            // this.
+            let mtime = if mtime == 0 { 1 } else { mtime };
+            UNIX_EPOCH
+                .checked_add(Duration::from_secs(mtime))
+                .map(Some)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "mtime exceeds system limits"))
         }
 
         let kind = self.header.entry_type();
@@ -714,8 +784,8 @@ impl<R: Read + Unpin> EntryFields<R> {
                     }
                 }?;
                 if self.preserve_mtime {
-                    if let Some(mtime) = get_mtime(&self.header) {
-                        filetime::set_symlink_file_times(dst, mtime, mtime).map_err(|e| {
+                    if let Some(mtime) = get_mtime(&self.header)? {
+                        set_symlink_file_times(dst, mtime).map_err(|e| {
                             TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
                         })?;
                     }
@@ -835,10 +905,12 @@ impl<R: Read + Unpin> EntryFields<R> {
         })?;
 
         if self.preserve_mtime {
-            if let Some(mtime) = get_mtime(&self.header) {
-                filetime::set_file_times(dst, mtime, mtime).map_err(|e| {
+            if let Some(mtime) = get_mtime(&self.header)? {
+                let file = f.into_std().await;
+                set_file_times(&file, mtime).map_err(|e| {
                     TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
                 })?;
+                f = fs::File::from_std(file);
             }
         }
         if self.preserve_permissions {
