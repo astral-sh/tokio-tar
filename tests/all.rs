@@ -927,6 +927,241 @@ async fn unterminated_pax_extensions_iterator_stops_after_error() {
 }
 
 #[tokio::test]
+async fn pax_only_accepts_local_pax_entries() {
+    for entry_type in [
+        EntryType::Regular,
+        EntryType::Link,
+        EntryType::Symlink,
+        EntryType::Char,
+        EntryType::Block,
+        EntryType::Directory,
+        EntryType::Fifo,
+    ] {
+        let mut header = regular_ustar_header();
+        header.set_entry_type(entry_type);
+        header.set_cksum();
+
+        let mut ar = ArchiveBuilder::new(Cursor::new(local_pax_archive(&header).await))
+            .set_pax_only(true)
+            .build();
+        let mut entries = t!(ar.entries());
+
+        let entry = t!(entries.next().await.unwrap());
+        assert_eq!(entry.header().entry_type(), entry_type);
+        assert!(entries.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn pax_only_rejects_raw_entries() {
+    let header = regular_ustar_header();
+    let mut ar = ArchiveBuilder::new(Cursor::new(local_pax_archive(&header).await))
+        .set_pax_only(true)
+        .build();
+    let err = match ar.entries_raw() {
+        Ok(_) => panic!("expected raw iteration in pax-only mode to be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err.to_string(),
+        "raw entries are not supported by pax-only mode"
+    );
+}
+
+#[tokio::test]
+async fn pax_only_accepts_bare_ustar_entries() {
+    let bytes = archive_with_header(&regular_ustar_header()).await;
+
+    let mut ar = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_pax_only(true)
+        .build();
+    let mut entries = t!(ar.entries());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(entry.header().entry_type(), EntryType::Regular);
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn pax_only_accepts_selective_local_pax_entries() {
+    let mut builder = Builder::new(Vec::new());
+    append_local_pax_header(&mut builder).await;
+    let header = regular_ustar_header();
+    t!(builder.append(&header, io::empty()).await);
+
+    let mut header = regular_ustar_header();
+    t!(header.set_path("bare"));
+    header.set_cksum();
+    t!(builder.append(&header, io::empty()).await);
+
+    let mut ar = ArchiveBuilder::new(Cursor::new(t!(builder.into_inner().await)))
+        .set_pax_only(true)
+        .build();
+    let mut entries = t!(ar.entries());
+
+    let first = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(first.path_bytes()), b"a");
+
+    let second = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(second.path_bytes()), b"bare");
+
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn pax_only_rejects_non_pax_headers() {
+    for mut header in [Header::new_old(), Header::new_gnu()] {
+        t!(header.set_path("file"));
+        header.set_size(0);
+        header.set_cksum();
+
+        let mut ar = ArchiveBuilder::new(Cursor::new(archive_with_header(&header).await))
+            .set_pax_only(true)
+            .build();
+        let err = t!(ar.entries()).next().await.unwrap().unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "archive header is not allowed by pax-only mode"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pax_only_rejects_non_pax_typeflags() {
+    for entry_type in [
+        EntryType::Continuous,
+        EntryType::XGlobalHeader,
+        EntryType::GNULongName,
+        EntryType::GNULongLink,
+        EntryType::GNUSparse,
+        EntryType::new(b'X'),
+    ] {
+        let mut header = regular_ustar_header();
+        header.set_entry_type(entry_type);
+        header.set_cksum();
+
+        let mut ar = ArchiveBuilder::new(Cursor::new(archive_with_header(&header).await))
+            .set_pax_only(true)
+            .build();
+        let err = t!(ar.entries()).next().await.unwrap().unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "archive header is not allowed by pax-only mode"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pax_only_rejects_non_octal_numeric_fields() {
+    for (field, byte) in [
+        ("mode", b'8'),
+        ("uid", 0x80),
+        ("gid", 0x80),
+        ("size", 0x80),
+        ("mtime", 0x80),
+        ("dev_major", 0x80),
+        ("dev_minor", 0x80),
+    ] {
+        let mut header = regular_ustar_header();
+        let ustar = header.as_ustar_mut().unwrap();
+        match field {
+            "mode" => ustar.mode[0] = byte,
+            "uid" => ustar.uid[0] = byte,
+            "gid" => ustar.gid[0] = byte,
+            "size" => {
+                ustar.size = [0; 12];
+                ustar.size[0] = byte;
+            }
+            "mtime" => ustar.mtime[0] = byte,
+            "dev_major" => ustar.dev_major[0] = byte,
+            "dev_minor" => ustar.dev_minor[0] = byte,
+            _ => unreachable!(),
+        }
+        header.set_cksum();
+
+        let mut ar = ArchiveBuilder::new(Cursor::new(local_pax_archive(&header).await))
+            .set_pax_only(true)
+            .build();
+        let err = t!(ar.entries()).next().await.unwrap().unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "archive header is not allowed by pax-only mode",
+            "field: {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pax_only_rejects_dangling_local_pax_headers() {
+    let mut ar = ArchiveBuilder::new(Cursor::new(local_pax_header_archive().await))
+        .set_pax_only(true)
+        .build();
+    let err = t!(ar.entries()).next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "local pax header is not followed by an archive entry"
+    );
+}
+
+#[tokio::test]
+async fn pax_only_rejects_stacked_local_pax_headers() {
+    let mut ar = ArchiveBuilder::new(Cursor::new(stacked_local_pax_header_archive().await))
+        .set_pax_only(true)
+        .build();
+    let err = t!(ar.entries()).next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "two pax extensions entries describing the same member"
+    );
+}
+
+fn regular_ustar_header() -> Header {
+    let mut header = Header::new_ustar();
+    t!(header.set_path("file"));
+    header.set_size(0);
+    header.set_cksum();
+    header
+}
+
+async fn archive_with_header(header: &Header) -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    t!(builder.append(header, io::empty()).await);
+    t!(builder.into_inner().await)
+}
+
+async fn local_pax_archive(header: &Header) -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    append_local_pax_header(&mut builder).await;
+    t!(builder.append(header, io::empty()).await);
+    t!(builder.into_inner().await)
+}
+
+async fn local_pax_header_archive() -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    append_local_pax_header(&mut builder).await;
+    t!(builder.into_inner().await)
+}
+
+async fn stacked_local_pax_header_archive() -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    append_local_pax_header(&mut builder).await;
+    append_local_pax_header(&mut builder).await;
+    t!(builder.into_inner().await)
+}
+
+async fn append_local_pax_header(builder: &mut Builder<Vec<u8>>) {
+    let record = b"9 path=a\n";
+    let mut header = Header::new_ustar();
+    t!(header.set_path("PaxHeaders/file"));
+    header.set_entry_type(EntryType::XHeader);
+    header.set_size(record.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &record[..]).await);
+}
+
+#[tokio::test]
 async fn pax_pending_interrupted() {
     use std::pin::Pin;
 

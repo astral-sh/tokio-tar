@@ -47,6 +47,7 @@ pub struct ArchiveInner<R> {
     allow_external_symlinks: bool,
     overwrite: bool,
     ignore_zeros: bool,
+    pax_only: bool,
     obj: Mutex<R>,
 }
 
@@ -59,6 +60,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     allow_external_symlinks: bool,
     overwrite: bool,
     ignore_zeros: bool,
+    pax_only: bool,
 }
 
 impl<R: Read + Unpin> ArchiveBuilder<R> {
@@ -71,6 +73,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             allow_external_symlinks: true,
             overwrite: true,
             ignore_zeros: false,
+            pax_only: false,
             obj,
         }
     }
@@ -121,6 +124,21 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Indicate whether to only accept strict POSIX pax-compatible input archives.
+    ///
+    /// This mode accepts UStar members that need no pax extended records and
+    /// local pax records that describe the following UStar member. It rejects
+    /// global pax extensions, non-pax typeflags, and non-octal header numeric
+    /// fields. Extended values must be carried by local pax records instead.
+    /// Raw entry iteration is unavailable in this mode because it cannot
+    /// validate local pax metadata without consuming the entry payload.
+    ///
+    /// This flag is disabled by default.
+    pub fn set_pax_only(mut self, pax_only: bool) -> Self {
+        self.pax_only = pax_only;
+        self
+    }
+
     /// Indicate whether to deny symlinks that point outside the destination
     /// directory when unpacking this entry. (Writing to locations outside the
     /// destination directory is _always_ forbidden.)
@@ -140,6 +158,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             allow_external_symlinks,
             overwrite,
             ignore_zeros,
+            pax_only,
             obj,
         } = self;
 
@@ -151,6 +170,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 allow_external_symlinks,
                 overwrite,
                 ignore_zeros,
+                pax_only,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
             }),
@@ -169,6 +189,7 @@ impl<R: Read + Unpin> Archive<R> {
                 allow_external_symlinks: true,
                 overwrite: true,
                 ignore_zeros: false,
+                pax_only: false,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
             }),
@@ -216,6 +237,9 @@ impl<R: Read + Unpin> Archive<R> {
     /// stream returns), then the contents read for each entry may be
     /// corrupted.
     pub fn entries_raw(&mut self) -> io::Result<RawEntries<R>> {
+        if self.inner.pax_only {
+            return Err(other("raw entries are not supported by pax-only mode"));
+        }
         if self.inner.pos.load(Ordering::SeqCst) != 0 {
             return Err(other(
                 "cannot call entries_raw unless archive is at \
@@ -350,16 +374,6 @@ pub struct Entries<R: Read + Unpin> {
     pax_extensions: (bool, Option<Vec<u8>>),
 }
 
-macro_rules! ready_opt_err {
-    ($val:expr) => {
-        match futures_core::ready!($val) {
-            Some(Ok(val)) => val,
-            Some(Err(err)) => return Poll::Ready(Some(Err(err))),
-            None => return Poll::Ready(None),
-        }
-    };
-}
-
 macro_rules! ready_err {
     ($val:expr) => {
         match futures_core::ready!($val) {
@@ -381,14 +395,25 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             } else {
                 let (next, current_header, current_header_pos, _, pax_extensions) =
                     &mut self.current;
-                ready_opt_err!(poll_next_raw(
+                match futures_core::ready!(poll_next_raw(
                     archive,
                     next,
                     current_header,
                     current_header_pos,
                     cx,
                     pax_extensions.as_deref(),
-                ))
+                    true,
+                )) {
+                    Some(Ok(entry)) => entry,
+                    Some(Err(err)) => return Poll::Ready(Some(Err(err))),
+                    None if self.archive.inner.pax_only && self.pax_extensions.0 => {
+                        self.pax_extensions.0 = false;
+                        return Poll::Ready(Some(Err(other(
+                            "local pax header is not followed by an archive entry",
+                        ))));
+                    }
+                    None => return Poll::Ready(None),
+                }
             };
 
             let is_recognized_header =
@@ -564,7 +589,15 @@ impl<R: Read + Unpin> Stream for RawEntries<R> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let archive = self.archive.clone();
         let (next, current_header, current_header_pos) = &mut self.current;
-        poll_next_raw(archive, next, current_header, current_header_pos, cx, None)
+        poll_next_raw(
+            archive,
+            next,
+            current_header,
+            current_header_pos,
+            cx,
+            None,
+            false,
+        )
     }
 }
 
@@ -575,6 +608,7 @@ fn poll_next_raw<R: Read + Unpin>(
     current_header_pos: &mut usize,
     cx: &mut Context<'_>,
     pax_extensions_data: Option<&[u8]>,
+    apply_pax_header_fields: bool,
 ) -> Poll<Option<io::Result<Entry<Archive<R>>>>> {
     let mut header_pos = *next;
 
@@ -634,6 +668,12 @@ fn poll_next_raw<R: Read + Unpin>(
         return Poll::Ready(Some(Err(other("archive header checksum mismatch"))));
     }
 
+    if archive.inner.pax_only && !is_pax_header(header) {
+        return Poll::Ready(Some(Err(other(
+            "archive header is not allowed by pax-only mode",
+        ))));
+    }
+
     let file_pos = *next;
 
     let mut header = current_header.take().unwrap();
@@ -676,25 +716,29 @@ fn poll_next_raw<R: Read + Unpin>(
                 }
 
                 "uid" => {
-                    let uid_str = extension
-                        .value()
-                        .map_err(|_e| other("failed to parse pax uid as string"))?;
-                    header.set_uid(
-                        uid_str
-                            .parse::<u64>()
-                            .map_err(|_e| other("failed to parse pax uid"))?,
-                    );
+                    if apply_pax_header_fields {
+                        let uid_str = extension
+                            .value()
+                            .map_err(|_e| other("failed to parse pax uid as string"))?;
+                        header.set_uid(
+                            uid_str
+                                .parse::<u64>()
+                                .map_err(|_e| other("failed to parse pax uid"))?,
+                        );
+                    }
                 }
 
                 "gid" => {
-                    let gid_str = extension
-                        .value()
-                        .map_err(|_e| other("failed to parse pax gid as string"))?;
-                    header.set_gid(
-                        gid_str
-                            .parse::<u64>()
-                            .map_err(|_e| other("failed to parse pax gid"))?,
-                    );
+                    if apply_pax_header_fields {
+                        let gid_str = extension
+                            .value()
+                            .map_err(|_e| other("failed to parse pax gid as string"))?;
+                        header.set_gid(
+                            gid_str
+                                .parse::<u64>()
+                                .map_err(|_e| other("failed to parse pax gid"))?,
+                        );
+                    }
                 }
 
                 _ => {
@@ -734,6 +778,46 @@ fn poll_next_raw<R: Read + Unpin>(
         .ok_or_else(|| other("size overflow"))?;
 
     Poll::Ready(Some(Ok(ret.into_entry())))
+}
+
+fn is_pax_header(header: &Header) -> bool {
+    let Some(ustar) = header.as_ustar() else {
+        return false;
+    };
+
+    is_pax_entry_type(header.entry_type()) && has_pax_numeric_fields(ustar)
+}
+
+fn is_pax_entry_type(entry_type: crate::EntryType) -> bool {
+    matches!(
+        entry_type,
+        crate::EntryType::Regular
+            | crate::EntryType::Link
+            | crate::EntryType::Symlink
+            | crate::EntryType::Char
+            | crate::EntryType::Block
+            | crate::EntryType::Directory
+            | crate::EntryType::Fifo
+            | crate::EntryType::XHeader
+    )
+}
+
+fn has_pax_numeric_fields(header: &crate::UstarHeader) -> bool {
+    [
+        &header.mode[..],
+        &header.uid[..],
+        &header.gid[..],
+        &header.size[..],
+        &header.mtime[..],
+        &header.dev_major[..],
+        &header.dev_minor[..],
+    ]
+    .into_iter()
+    .all(|field| {
+        field
+            .iter()
+            .all(|byte| matches!(byte, b'\0' | b' ' | b'0'..=b'7'))
+    })
 }
 
 fn poll_parse_sparse_header<R: Read + Unpin>(
