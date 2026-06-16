@@ -904,6 +904,29 @@ async fn pax_simple() {
 }
 
 #[tokio::test]
+async fn unterminated_pax_record_is_rejected() {
+    let mut ar = Archive::new(tar!("diff-014-unterminated-pax.tar"));
+    let mut entries = t!(ar.entries());
+
+    let err = match entries.next().await.unwrap() {
+        Ok(_) => panic!("expected unterminated PAX record to be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("malformed pax extension"));
+}
+
+#[tokio::test]
+async fn unterminated_pax_extensions_iterator_stops_after_error() {
+    let mut ar = Archive::new(tar!("diff-014-unterminated-pax.tar"));
+    let mut entries = t!(ar.entries_raw());
+    let mut entry = t!(entries.next().await.unwrap());
+    let mut extensions = t!(entry.pax_extensions().await).unwrap();
+
+    assert!(extensions.next().unwrap().is_err());
+    assert!(extensions.next().is_none());
+}
+
+#[tokio::test]
 async fn pax_pending_interrupted() {
     use std::pin::Pin;
 
