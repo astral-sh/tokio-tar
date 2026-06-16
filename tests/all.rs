@@ -1041,6 +1041,31 @@ async fn long_name_trailing_nul() {
 }
 
 #[tokio::test]
+async fn long_name_stops_at_first_nul() {
+    let mut b = Builder::new(Vec::<u8>::new());
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("././@LongLink"));
+    h.set_size(8);
+    h.set_entry_type(EntryType::new(b'L'));
+    h.set_cksum();
+    t!(b.append(&h, b"foo\0bar\0" as &[u8]).await);
+
+    let mut h = Header::new_gnu();
+    t!(h.set_path("fallback"));
+    h.set_size(0);
+    h.set_entry_type(EntryType::file());
+    h.set_cksum();
+    t!(b.append(&h, &[][..]).await);
+
+    let contents = t!(b.into_inner().await);
+    let mut a = Archive::new(&contents[..]);
+    let e = t!(t!(a.entries()).next().await.unwrap());
+
+    assert_eq!(&*t!(e.path_bytes()), b"foo");
+}
+
+#[tokio::test]
 async fn long_linkname_trailing_nul() {
     let mut b = Builder::new(Vec::<u8>::new());
 
@@ -1787,4 +1812,52 @@ async fn gnu_longlink_and_later_pax_linkpath_are_rejected() {
         err.to_string(),
         "ambiguous link target: pax linkpath and GNU longlink describe the same member"
     );
+}
+
+#[tokio::test]
+async fn gnu_long_pathname_stops_at_first_nul() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'L'));
+    header.set_size(11);
+    header.set_cksum();
+    t!(builder.append(&header, b"name\0hidden" as &[u8]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("raw-name"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let entry = t!(t!(archive.entries()).next().await.unwrap());
+
+    assert_eq!(&*t!(entry.path_bytes()), b"name");
+}
+
+#[tokio::test]
+async fn gnu_long_linkname_stops_at_first_nul() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'K'));
+    header.set_size(13);
+    header.set_cksum();
+    t!(builder.append(&header, b"target\0hidden" as &[u8]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("link"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let entry = t!(t!(archive.entries()).next().await.unwrap());
+
+    assert_eq!(&*t!(entry.link_name_bytes()).unwrap(), b"target");
 }
