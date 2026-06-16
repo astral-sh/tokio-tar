@@ -463,8 +463,8 @@ impl<R: Read + Unpin> EntryFields<R> {
     fn path_bytes(&self) -> io::Result<Cow<'_, [u8]>> {
         match self.long_pathname {
             Some(ref bytes) => {
-                if let Some(&0) = bytes.last() {
-                    Ok(Cow::Borrowed(&bytes[..bytes.len() - 1]))
+                if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+                    Ok(Cow::Borrowed(&bytes[..nul]))
                 } else {
                     Ok(Cow::Borrowed(bytes))
                 }
@@ -503,8 +503,8 @@ impl<R: Read + Unpin> EntryFields<R> {
     fn link_name_bytes(&self) -> io::Result<Option<Cow<'_, [u8]>>> {
         match self.long_linkname {
             Some(ref bytes) => {
-                if let Some(&0) = bytes.last() {
-                    Ok(Some(Cow::Borrowed(&bytes[..bytes.len() - 1])))
+                if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+                    Ok(Some(Cow::Borrowed(&bytes[..nul])))
                 } else {
                     Ok(Some(Cow::Borrowed(bytes)))
                 }
