@@ -16,7 +16,7 @@ use tokio::{
 use tokio_stream::*;
 
 use crate::{
-    entry::{EntryFields, EntryIo},
+    entry::{EntryFields, EntryIo, PaxOwnerName},
     error::TarError,
     other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
 };
@@ -680,6 +680,8 @@ fn poll_next_raw<R: Read + Unpin>(
 
     // note when pax extensions are available, the size from the header will be ignored
     let mut size = header.entry_size()?;
+    let mut pax_username = None;
+    let mut pax_groupname = None;
 
     // PAX extensions describe the next *file entry*, not intermediary extensions.
     // See: "pax Header Block," `x` typeflag:
@@ -741,6 +743,30 @@ fn poll_next_raw<R: Read + Unpin>(
                     }
                 }
 
+                "uname" => {
+                    let value = extension.value_bytes();
+                    pax_username = Some(PaxOwnerName::from_bytes(value));
+                    if !value.is_empty() {
+                        let Ok(uname) = extension.value() else {
+                            continue;
+                        };
+                        // Keep the existing effective-header behavior when the
+                        // physical field can represent the override.
+                        let _ = header.set_username(uname);
+                    }
+                }
+
+                "gname" => {
+                    let value = extension.value_bytes();
+                    pax_groupname = Some(PaxOwnerName::from_bytes(value));
+                    if !value.is_empty() {
+                        let Ok(gname) = extension.value() else {
+                            continue;
+                        };
+                        let _ = header.set_groupname(gname);
+                    }
+                }
+
                 _ => {
                     continue;
                 }
@@ -760,6 +786,8 @@ fn poll_next_raw<R: Read + Unpin>(
         long_pathname: None,
         long_linkname: None,
         pax_extensions: None,
+        pax_username,
+        pax_groupname,
         unpack_xattrs: archive.inner.unpack_xattrs,
         preserve_permissions: archive.inner.preserve_permissions,
         preserve_mtime: archive.inner.preserve_mtime,

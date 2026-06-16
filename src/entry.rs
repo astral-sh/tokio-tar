@@ -14,6 +14,7 @@ use std::{
     marker,
     path::{Component, Path, PathBuf},
     pin::Pin,
+    str,
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -97,6 +98,29 @@ pub struct Entry<R: Read + Unpin> {
     _ignored: marker::PhantomData<Archive<R>>,
 }
 
+#[derive(Debug)]
+pub(crate) enum PaxOwnerName {
+    Deleted,
+    Override(Vec<u8>),
+}
+
+impl PaxOwnerName {
+    pub(crate) fn from_bytes(value: &[u8]) -> Self {
+        if value.is_empty() {
+            Self::Deleted
+        } else {
+            Self::Override(value.to_vec())
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Deleted => None,
+            Self::Override(value) => Some(value),
+        }
+    }
+}
+
 impl<R: Read + Unpin> fmt::Debug for Entry<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry")
@@ -111,6 +135,8 @@ pub struct EntryFields<R: Read + Unpin> {
     pub long_pathname: Option<Vec<u8>>,
     pub long_linkname: Option<Vec<u8>>,
     pub pax_extensions: Option<Vec<u8>>,
+    pub(crate) pax_username: Option<PaxOwnerName>,
+    pub(crate) pax_groupname: Option<PaxOwnerName>,
     pub header: Header,
     pub size: u64,
     pub header_pos: u64,
@@ -130,6 +156,8 @@ impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
             .field("long_pathname", &self.long_pathname)
             .field("long_linkname", &self.long_linkname)
             .field("pax_extensions", &self.pax_extensions)
+            .field("pax_username", &self.pax_username)
+            .field("pax_groupname", &self.pax_groupname)
             .field("header", &self.header)
             .field("size", &self.size)
             .field("header_pos", &self.header_pos)
@@ -236,6 +264,52 @@ impl<R: Read + Unpin> Entry<R> {
     /// This method may return an error if PAX extensions are malformed.
     pub fn link_name_bytes(&self) -> io::Result<Option<Cow<'_, [u8]>>> {
         self.fields.link_name_bytes()
+    }
+
+    /// Returns the user name of the owner of this entry.
+    ///
+    /// Unlike [`Header::username`], this method includes a `uname` value from
+    /// a PAX extension describing the entry. A zero-length PAX value deletes
+    /// any user name present in the entry header.
+    pub fn username(&self) -> Result<Option<&str>, str::Utf8Error> {
+        match self.username_bytes() {
+            Some(bytes) => str::from_utf8(bytes).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the user name of the owner of this entry as bytes, if present.
+    ///
+    /// Unlike [`Header::username_bytes`], this method includes a `uname` value
+    /// from a PAX extension describing the entry.
+    pub fn username_bytes(&self) -> Option<&[u8]> {
+        match self.fields.pax_username.as_ref() {
+            Some(name) => name.as_bytes(),
+            None => self.fields.header.username_bytes(),
+        }
+    }
+
+    /// Returns the group name of the owner of this entry.
+    ///
+    /// Unlike [`Header::groupname`], this method includes a `gname` value from
+    /// a PAX extension describing the entry. A zero-length PAX value deletes
+    /// any group name present in the entry header.
+    pub fn groupname(&self) -> Result<Option<&str>, str::Utf8Error> {
+        match self.groupname_bytes() {
+            Some(bytes) => str::from_utf8(bytes).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the group name of the owner of this entry as bytes, if present.
+    ///
+    /// Unlike [`Header::groupname_bytes`], this method includes a `gname`
+    /// value from a PAX extension describing the entry.
+    pub fn groupname_bytes(&self) -> Option<&[u8]> {
+        match self.fields.pax_groupname.as_ref() {
+            Some(name) => name.as_bytes(),
+            None => self.fields.header.groupname_bytes(),
+        }
     }
 
     /// Returns an iterator over the pax extensions contained in this entry.
