@@ -1682,3 +1682,109 @@ async fn gnu_longname_and_later_pax_path_are_rejected() {
         "ambiguous path: pax path and GNU longname describe the same member"
     );
 }
+
+#[tokio::test]
+async fn pax_linkpath_and_gnu_longlink_are_rejected() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax = b"23 linkpath=pax-target\n";
+    let mut header = Header::new_gnu();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'K'));
+    header.set_size(11);
+    header.set_cksum();
+    t!(builder.append(&header, b"gnu-target\0" as &[u8]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("symlink"));
+    header.set_entry_type(EntryType::symlink());
+    t!(header.set_link_name("raw-target"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries())
+        .next()
+        .await
+        .unwrap()
+        .expect_err("expected competing link target extensions to be rejected");
+    assert_eq!(
+        err.to_string(),
+        "ambiguous link target: pax linkpath and GNU longlink describe the same member"
+    );
+}
+
+#[tokio::test]
+async fn last_pax_linkpath_wins() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax = b"22 linkpath=pax-first\n21 linkpath=pax-last\n";
+    let mut header = Header::new_gnu();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("symlink"));
+    header.set_entry_type(EntryType::symlink());
+    t!(header.set_link_name("raw-target"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let entry = t!(t!(archive.entries()).next().await.unwrap());
+    assert_eq!(&*t!(entry.link_name_bytes()).unwrap(), b"pax-last");
+}
+
+#[tokio::test]
+async fn gnu_longlink_and_later_pax_linkpath_are_rejected() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'K'));
+    header.set_size(11);
+    header.set_cksum();
+    t!(builder.append(&header, b"gnu-target\0" as &[u8]).await);
+
+    let pax = b"23 linkpath=pax-target\n";
+    let mut header = Header::new_gnu();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("symlink"));
+    header.set_entry_type(EntryType::symlink());
+    t!(header.set_link_name("raw-target"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries())
+        .next()
+        .await
+        .unwrap()
+        .expect_err("expected competing link target extensions to be rejected");
+    assert_eq!(
+        err.to_string(),
+        "ambiguous link target: pax linkpath and GNU longlink describe the same member"
+    );
+}
