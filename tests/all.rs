@@ -1583,3 +1583,79 @@ async fn pax_size_does_not_apply_to_extension_headers() {
         entries
     );
 }
+
+#[tokio::test]
+async fn pax_path_and_gnu_longname_are_rejected() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax = b"17 path=pax-name\n";
+    let mut header = Header::new_gnu();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'L'));
+    header.set_size(9);
+    header.set_cksum();
+    t!(builder.append(&header, b"gnu-name\0" as &[u8]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("raw-name"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries())
+        .next()
+        .await
+        .unwrap()
+        .expect_err("expected competing path extensions to be rejected");
+    assert_eq!(
+        err.to_string(),
+        "ambiguous path: pax path and GNU longname describe the same member"
+    );
+}
+
+#[tokio::test]
+async fn gnu_longname_and_later_pax_path_are_rejected() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("././@LongLink"));
+    header.set_entry_type(EntryType::new(b'L'));
+    header.set_size(9);
+    header.set_cksum();
+    t!(builder.append(&header, b"gnu-name\0" as &[u8]).await);
+
+    let pax = b"17 path=pax-name\n";
+    let mut header = Header::new_gnu();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("raw-name"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries())
+        .next()
+        .await
+        .unwrap()
+        .expect_err("expected competing path extensions to be rejected");
+    assert_eq!(
+        err.to_string(),
+        "ambiguous path: pax path and GNU longname describe the same member"
+    );
+}
