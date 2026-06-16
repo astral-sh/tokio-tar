@@ -10,6 +10,7 @@ use crate::other;
 /// key/value pairs.
 pub struct PaxExtensions<'entry> {
     data: slice::Split<'entry, u8, fn(&u8) -> bool>,
+    unterminated: bool,
 }
 
 /// A key/value pair corresponding to a pax extension.
@@ -21,6 +22,9 @@ pub struct PaxExtension<'entry> {
 pub fn pax_extensions(a: &[u8]) -> PaxExtensions<'_> {
     PaxExtensions {
         data: a.split(|a| *a == b'\n'),
+        // Empty PAX bodies apply no extensions and are accepted by CPython,
+        // Go, and libarchive despite POSIX's one-or-more-records wording.
+        unterminated: !a.is_empty() && !a.ends_with(b"\n"),
     }
 }
 
@@ -28,6 +32,11 @@ impl<'entry> Iterator for PaxExtensions<'entry> {
     type Item = io::Result<PaxExtension<'entry>>;
 
     fn next(&mut self) -> Option<io::Result<PaxExtension<'entry>>> {
+        if self.unterminated {
+            self.unterminated = false;
+            self.data.by_ref().for_each(drop);
+            return Some(Err(other("malformed pax extension")));
+        }
         let line = match self.data.next() {
             Some([]) => return None,
             Some(line) => line,
