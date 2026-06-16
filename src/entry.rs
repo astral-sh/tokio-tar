@@ -512,11 +512,15 @@ impl<R: Read + Unpin> EntryFields<R> {
             None => {
                 if let Some(ref pax) = self.pax_extensions {
                     // Check for malformed PAX extensions and return hard error
+                    let mut linkpath = None;
                     for ext in pax_extensions(pax) {
                         let ext = ext?; // Propagate error instead of silently dropping
                         if ext.key_bytes() == b"linkpath" {
-                            return Ok(Some(Cow::Borrowed(ext.value_bytes())));
+                            linkpath = Some(ext.value_bytes());
                         }
+                    }
+                    if let Some(linkpath) = linkpath {
+                        return Ok(Some(Cow::Borrowed(linkpath)));
                     }
                 }
                 Ok(self.header.link_name_bytes())

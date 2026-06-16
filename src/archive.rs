@@ -434,6 +434,19 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             }
 
             if is_recognized_header && entry.header().entry_type().is_gnu_longlink() {
+                if self.pax_extensions.0 {
+                    for extension in pax_extensions(self.pax_extensions.1.as_deref().unwrap()) {
+                        let extension = match extension {
+                            Ok(extension) => extension,
+                            Err(err) => return Poll::Ready(Some(Err(err))),
+                        };
+                        if extension.key_bytes() == b"linkpath" {
+                            return Poll::Ready(Some(Err(other(
+                                "ambiguous link target: pax linkpath and GNU longlink describe the same member",
+                            ))));
+                        }
+                    }
+                }
                 if self.gnu_longlink.0 {
                     return Poll::Ready(Some(Err(other(
                         "two long name entries describing \
@@ -481,18 +494,25 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                     return Poll::Pending;
                 }
 
-                if self.gnu_longname.0 {
-                    for extension in pax_extensions(self.pax_extensions.1.as_deref().unwrap()) {
-                        let extension = match extension {
-                            Ok(extension) => extension,
-                            Err(err) => return Poll::Ready(Some(Err(err))),
-                        };
-                        if extension.key_bytes() == b"path" {
-                            return Poll::Ready(Some(Err(other(
-                                "ambiguous path: pax path and GNU longname describe the same member",
-                            ))));
-                        }
+                let mut has_linkpath = false;
+                for extension in pax_extensions(self.pax_extensions.1.as_deref().unwrap()) {
+                    let extension = match extension {
+                        Ok(extension) => extension,
+                        Err(err) => return Poll::Ready(Some(Err(err))),
+                    };
+                    if self.gnu_longname.0 && extension.key_bytes() == b"path" {
+                        return Poll::Ready(Some(Err(other(
+                            "ambiguous path: pax path and GNU longname describe the same member",
+                        ))));
                     }
+                    if extension.key_bytes() == b"linkpath" {
+                        has_linkpath = true;
+                    }
+                }
+                if has_linkpath && self.gnu_longlink.0 {
+                    return Poll::Ready(Some(Err(other(
+                        "ambiguous link target: pax linkpath and GNU longlink describe the same member",
+                    ))));
                 }
 
                 self.pax_extensions.0 = true;
