@@ -1398,6 +1398,47 @@ async fn pax_non_utf8_owner_names_are_exposed_as_bytes() {
 }
 
 #[tokio::test]
+async fn pax_size_updates_header() {
+    let mut ar = Archive::new(tar!("pax-header-precedence.tar"));
+    let mut entries = t!(ar.entries());
+
+    let first = t!(entries.next().await.unwrap());
+    assert!(first.path().unwrap().ends_with("normal.txt"));
+
+    let second = t!(entries.next().await.unwrap());
+    assert!(second.path().unwrap().ends_with("blob.bin"));
+    assert_eq!(second.header().size().unwrap(), 1024);
+}
+
+#[tokio::test]
+async fn last_pax_size_wins() {
+    let mut sizes = pax_record("size", b"3");
+    sizes.extend(pax_record("size", b"4"));
+
+    let mut builder = Builder::new(Vec::new());
+    let mut extension = Header::new_ustar();
+    extension.set_size(sizes.len() as u64);
+    extension.set_entry_type(EntryType::new(b'x'));
+    t!(builder.append_data(&mut extension, "pax", &sizes[..]).await);
+
+    let mut file = Header::new_ustar();
+    file.set_size(4);
+    t!(builder.append_data(&mut file, "file", &b"DATA"[..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let mut file = t!(entries.next().await.unwrap());
+    assert_eq!(t!(file.header().size()), 4);
+
+    let mut contents = Vec::new();
+    t!(file.read_to_end(&mut contents).await);
+    assert_eq!(contents, b"DATA");
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn long_name_trailing_nul() {
     let mut b = Builder::new(Vec::<u8>::new());
 

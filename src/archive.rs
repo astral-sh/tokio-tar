@@ -715,6 +715,7 @@ fn poll_next_raw<R: Read + Unpin>(
                     size = size_str
                         .parse::<u64>()
                         .map_err(|_e| other("failed to parse pax size"))?;
+                    header.set_size(size);
                 }
 
                 "uid" => {
