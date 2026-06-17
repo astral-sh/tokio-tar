@@ -497,7 +497,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 continue;
             }
 
-            if is_recognized_header && entry.header().entry_type().is_pax_local_extensions() {
+            if is_recognized_header && entry.header().is_pax_local_extensions() {
                 if self.pax_extensions.0 {
                     return Poll::Ready(Some(Err(other(
                         "two pax extensions entries describing \
@@ -689,7 +689,7 @@ fn poll_next_raw<R: Read + Unpin>(
     let entry_type = header.entry_type();
     let is_extension_header = entry_type.is_gnu_longname()
         || entry_type.is_gnu_longlink()
-        || entry_type.is_pax_local_extensions()
+        || header.is_pax_local_extensions()
         || entry_type.is_pax_global_extensions();
 
     // the size above will be overriden by the pax data if it has a size field.

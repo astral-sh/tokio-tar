@@ -695,6 +695,11 @@ impl Header {
         EntryType::new(self.as_old().linkflag[0])
     }
 
+    pub(crate) fn is_pax_local_extensions(&self) -> bool {
+        self.entry_type().is_pax_local_extensions()
+            || (self.entry_type() == EntryType::SolarisXHeader && self.as_ustar().is_some())
+    }
+
     /// Sets the type of file that will be described by this header.
     pub fn set_entry_type(&mut self, ty: EntryType) {
         self.as_old_mut().linkflag = [ty.as_byte()];
