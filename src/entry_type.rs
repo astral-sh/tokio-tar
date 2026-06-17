@@ -34,6 +34,8 @@ pub enum EntryType {
     XGlobalHeader,
     /// Extended Header
     XHeader,
+    /// Solaris extended header typeflag
+    SolarisXHeader,
     /// Unknown header,
     Other(u8),
 }
@@ -55,6 +57,7 @@ impl EntryType {
             b'7' => EntryType::Continuous,
             b'x' => EntryType::XHeader,
             b'g' => EntryType::XGlobalHeader,
+            b'X' => EntryType::SolarisXHeader,
             b'L' => EntryType::GNULongName,
             b'K' => EntryType::GNULongLink,
             b'S' => EntryType::GNUSparse,
@@ -75,6 +78,7 @@ impl EntryType {
             EntryType::Continuous => b'7',
             EntryType::XHeader => b'x',
             EntryType::XGlobalHeader => b'g',
+            EntryType::SolarisXHeader => b'X',
             EntryType::GNULongName => b'L',
             EntryType::GNULongLink => b'K',
             EntryType::GNUSparse => b'S',
@@ -182,7 +186,10 @@ impl EntryType {
         self == EntryType::XGlobalHeader
     }
 
-    /// Returns whether this type represents a GNU long link header.
+    /// Returns whether this type represents a POSIX local PAX extension header.
+    ///
+    /// A Solaris `X` typeflag is only a local PAX extension in an appropriate
+    /// carrier header, which cannot be determined from this typeflag alone.
     pub fn is_pax_local_extensions(self) -> bool {
         self == EntryType::XHeader
     }

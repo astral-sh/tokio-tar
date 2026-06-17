@@ -1439,6 +1439,70 @@ async fn last_pax_size_wins() {
 }
 
 #[tokio::test]
+async fn solaris_extended_header_applies_pax_path() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax_path = b"21 path=solaris-path\n";
+    let mut extension = Header::new_ustar();
+    extension.set_size(pax_path.len() as u64);
+    extension.set_entry_type(EntryType::new(b'X'));
+    t!(builder
+        .append_data(&mut extension, "SolarisHeader", &pax_path[..])
+        .await);
+
+    let mut file = Header::new_ustar();
+    file.set_size(4);
+    t!(builder
+        .append_data(&mut file, "raw-name", &b"DATA"[..])
+        .await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let mut file = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(file.path_bytes()), b"solaris-path");
+    let mut contents = String::new();
+    t!(file.read_to_string(&mut contents).await);
+    assert_eq!(contents, "DATA");
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn gnu_x_typeflag_is_not_a_solaris_pax_extension() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax_path = b"21 path=solaris-path\n";
+    let mut extension = Header::new_gnu();
+    extension.set_size(pax_path.len() as u64);
+    extension.set_entry_type(EntryType::new(b'X'));
+    t!(builder
+        .append_data(&mut extension, "GNUHeader", &pax_path[..])
+        .await);
+
+    let mut file = Header::new_ustar();
+    file.set_size(4);
+    t!(builder
+        .append_data(&mut file, "raw-name", &b"DATA"[..])
+        .await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let mut extension = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(extension.path_bytes()), b"GNUHeader");
+    let mut contents = String::new();
+    t!(extension.read_to_string(&mut contents).await);
+    assert_eq!(contents, "21 path=solaris-path\n");
+
+    let file = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(file.path_bytes()), b"raw-name");
+
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn long_name_trailing_nul() {
     let mut b = Builder::new(Vec::<u8>::new());
 

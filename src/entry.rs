@@ -605,7 +605,7 @@ impl<R: Read + Unpin> EntryFields<R> {
     async fn pax_extensions(&mut self) -> io::Result<Option<PaxExtensions<'_>>> {
         if self.pax_extensions.is_none() {
             if !self.header.entry_type().is_pax_global_extensions()
-                && !self.header.entry_type().is_pax_local_extensions()
+                && !self.header.is_pax_local_extensions()
             {
                 return Ok(None);
             }
@@ -890,7 +890,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 tokio::fs::symlink(src, dst).await
             }
         } else if kind.is_pax_global_extensions()
-            || kind.is_pax_local_extensions()
+            || self.header.is_pax_local_extensions()
             || kind.is_gnu_longname()
             || kind.is_gnu_longlink()
         {
