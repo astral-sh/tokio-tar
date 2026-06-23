@@ -426,10 +426,20 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 }
             };
 
-            let is_recognized_header =
-                entry.header().as_gnu().is_some() || entry.header().as_ustar().is_some();
+            let is_ustar_header = entry.header().as_ustar().is_some();
+            let permits_gnu_extensions = entry.header().as_gnu().is_some() || is_ustar_header;
+            let entry_type = entry.header().entry_type();
 
-            if is_recognized_header && entry.header().entry_type().is_gnu_longname() {
+            if (!permits_gnu_extensions
+                && (entry_type.is_gnu_longname() || entry_type.is_gnu_longlink()))
+                || (!is_ustar_header && entry_type.is_pax_local_extensions())
+            {
+                return Poll::Ready(Some(Err(other(
+                    "extension typeflag is not permitted on an unrecognized header",
+                ))));
+            }
+
+            if permits_gnu_extensions && entry_type.is_gnu_longname() {
                 if self.pax_extensions.0 {
                     for extension in pax_extensions(self.pax_extensions.1.as_deref().unwrap()) {
                         let extension = match extension {
@@ -468,7 +478,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 continue;
             }
 
-            if is_recognized_header && entry.header().entry_type().is_gnu_longlink() {
+            if permits_gnu_extensions && entry_type.is_gnu_longlink() {
                 if self.pax_extensions.0 {
                     for extension in pax_extensions(self.pax_extensions.1.as_deref().unwrap()) {
                         let extension = match extension {
@@ -507,7 +517,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 continue;
             }
 
-            if is_recognized_header && entry.header().is_pax_local_extensions() {
+            if is_ustar_header && entry.header().is_pax_local_extensions() {
                 if self.pax_extensions.0 {
                     return Poll::Ready(Some(Err(other(
                         "two pax extensions entries describing \
