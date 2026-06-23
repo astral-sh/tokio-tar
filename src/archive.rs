@@ -755,9 +755,7 @@ fn poll_next_raw<R: Read + Unpin>(
                     let size_str = extension
                         .value()
                         .map_err(|_e| other("failed to parse pax size as string"))?;
-                    size = size_str
-                        .parse::<u64>()
-                        .map_err(|_e| other("failed to parse pax size"))?;
+                    size = parse_pax_decimal(size_str, "failed to parse pax size")?;
                     header.set_size(size);
                 }
 
@@ -766,11 +764,7 @@ fn poll_next_raw<R: Read + Unpin>(
                         let uid_str = extension
                             .value()
                             .map_err(|_e| other("failed to parse pax uid as string"))?;
-                        header.set_uid(
-                            uid_str
-                                .parse::<u64>()
-                                .map_err(|_e| other("failed to parse pax uid"))?,
-                        );
+                        header.set_uid(parse_pax_decimal(uid_str, "failed to parse pax uid")?);
                     }
                 }
 
@@ -779,11 +773,7 @@ fn poll_next_raw<R: Read + Unpin>(
                         let gid_str = extension
                             .value()
                             .map_err(|_e| other("failed to parse pax gid as string"))?;
-                        header.set_gid(
-                            gid_str
-                                .parse::<u64>()
-                                .map_err(|_e| other("failed to parse pax gid"))?,
-                        );
+                        header.set_gid(parse_pax_decimal(gid_str, "failed to parse pax gid")?);
                     }
                 }
 
@@ -910,6 +900,14 @@ fn has_pax_numeric_fields(header: &crate::UstarHeader) -> bool {
             .iter()
             .all(|byte| matches!(byte, b'\0' | b' ' | b'0'..=b'7'))
     })
+}
+
+fn parse_pax_decimal(value: &str, parse_error: &'static str) -> io::Result<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(other(parse_error));
+    }
+
+    value.parse::<u64>().map_err(|_e| other(parse_error))
 }
 
 fn poll_parse_sparse_header<R: Read + Unpin>(

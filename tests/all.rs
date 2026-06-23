@@ -1318,6 +1318,59 @@ async fn pax_precedence() {
     assert!(entries.next().await.is_none());
 }
 
+async fn pax_numeric_override_archive(pax: &[u8]) -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut pax_header = Header::new_ustar();
+    pax_header.set_entry_type(EntryType::new(b'x'));
+    t!(pax_header.set_path("PaxHeaders/file"));
+    pax_header.set_size(pax.len() as u64);
+    pax_header.set_cksum();
+    t!(builder.append(&pax_header, pax).await);
+
+    let mut file_header = Header::new_ustar();
+    t!(file_header.set_path("file"));
+    file_header.set_size(2);
+    file_header.set_cksum();
+    t!(builder.append(&file_header, b"ok".as_slice()).await);
+
+    t!(builder.into_inner().await)
+}
+
+#[tokio::test]
+async fn pax_numeric_overrides_accept_decimal_digits() {
+    let contents = pax_numeric_override_archive(b"9 size=2\n9 uid=42\n9 gid=43\n").await;
+    let mut archive = Archive::new(&contents[..]);
+    let mut entries = t!(archive.entries());
+
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(t!(entry.header().size()), 2);
+    assert_eq!(t!(entry.header().uid()), 42);
+    assert_eq!(t!(entry.header().gid()), 43);
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn pax_numeric_overrides_reject_sign_prefixes() {
+    for pax in [
+        b"11 size=+2\n".as_slice(),
+        b"11 uid=+42\n".as_slice(),
+        b"11 gid=+43\n".as_slice(),
+    ] {
+        let contents = pax_numeric_override_archive(pax).await;
+        let mut archive = Archive::new(&contents[..]);
+        let mut entries = t!(archive.entries());
+        let entry = entries.next().await.unwrap();
+        let error = entry.expect_err("expected a sign-prefixed PAX numeric value to fail");
+
+        assert!(
+            error.to_string().contains("failed to parse pax"),
+            "bad error: {}",
+            error
+        );
+    }
+}
+
 #[tokio::test]
 async fn pax_owner_names_override_entry_metadata() {
     let mut builder = Builder::new(Vec::new());
