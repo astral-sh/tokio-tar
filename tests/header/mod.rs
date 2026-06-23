@@ -40,6 +40,15 @@ fn goto_ustar() {
 }
 
 #[test]
+fn ustar_nul_version_is_not_recognized() {
+    let mut h = Header::new_ustar();
+    h.as_ustar_mut().unwrap().version = [0, 0];
+
+    assert!(h.as_ustar().is_none());
+    assert!(h.as_ustar_mut().is_none());
+}
+
+#[test]
 fn link_name() {
     let mut h = Header::new_gnu();
     t!(h.set_link_name("foo"));
