@@ -2247,7 +2247,7 @@ async fn pax_path_and_gnu_longname_are_rejected() {
     let mut builder = Builder::new(Vec::new());
 
     let pax = b"17 path=pax-name\n";
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     t!(header.set_path("PaxHeaders/x"));
     header.set_entry_type(EntryType::new(b'x'));
     header.set_size(pax.len() as u64);
@@ -2292,7 +2292,7 @@ async fn gnu_longname_and_later_pax_path_are_rejected() {
     t!(builder.append(&header, b"gnu-name\0" as &[u8]).await);
 
     let pax = b"17 path=pax-name\n";
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     t!(header.set_path("PaxHeaders/x"));
     header.set_entry_type(EntryType::new(b'x'));
     header.set_size(pax.len() as u64);
@@ -2323,7 +2323,7 @@ async fn pax_linkpath_and_gnu_longlink_are_rejected() {
     let mut builder = Builder::new(Vec::new());
 
     let pax = b"23 linkpath=pax-target\n";
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     t!(header.set_path("PaxHeaders/x"));
     header.set_entry_type(EntryType::new(b'x'));
     header.set_size(pax.len() as u64);
@@ -2363,7 +2363,7 @@ async fn last_pax_linkpath_wins() {
     let mut builder = Builder::new(Vec::new());
 
     let pax = b"22 linkpath=pax-first\n21 linkpath=pax-last\n";
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     t!(header.set_path("PaxHeaders/x"));
     header.set_entry_type(EntryType::new(b'x'));
     header.set_size(pax.len() as u64);
@@ -2396,7 +2396,7 @@ async fn gnu_longlink_and_later_pax_linkpath_are_rejected() {
     t!(builder.append(&header, b"gnu-target\0" as &[u8]).await);
 
     let pax = b"23 linkpath=pax-target\n";
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     t!(header.set_path("PaxHeaders/x"));
     header.set_entry_type(EntryType::new(b'x'));
     header.set_size(pax.len() as u64);
@@ -2534,5 +2534,52 @@ async fn nul_version_ustar_headers_are_rejected() {
     assert_eq!(
         err.to_string(),
         "NUL-version USTAR header is ambiguous and not supported"
+    );
+}
+
+#[tokio::test]
+async fn extension_typeflags_on_old_headers_are_rejected() {
+    for (entry_type, data) in [
+        (EntryType::new(b'x'), b"17 path=pax-name\n".as_slice()),
+        (EntryType::GNULongName, b"long-name\0".as_slice()),
+        (EntryType::GNULongLink, b"long-link\0".as_slice()),
+    ] {
+        let mut builder = Builder::new(Vec::new());
+        let mut header = Header::new_old();
+        t!(header.set_path("ambiguous"));
+        header.set_entry_type(entry_type);
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        t!(builder.append(&header, data).await);
+
+        let bytes = t!(builder.into_inner().await);
+        let mut archive = Archive::new(&bytes[..]);
+        let err = t!(archive.entries()).next().await.unwrap().unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "extension typeflag is not permitted on an unrecognized header"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pax_typeflag_on_gnu_header_is_rejected() {
+    let pax = b"17 path=pax-name\n";
+    let mut builder = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    t!(header.set_path("ambiguous"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries()).next().await.unwrap().unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "extension typeflag is not permitted on an unrecognized header"
     );
 }

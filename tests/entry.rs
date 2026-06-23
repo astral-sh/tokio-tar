@@ -469,7 +469,7 @@ async fn malformed_pax_path_extension() {
     let mut ar_bytes = Vec::new();
 
     // First, create a PAX extension header with malformed content
-    let mut pax_header = async_tar::Header::new_gnu();
+    let mut pax_header = async_tar::Header::new_ustar();
     pax_header.set_entry_type(async_tar::EntryType::new(b'x')); // PAX local extensions
     t!(pax_header.set_path("PaxHeaders/file"));
 
