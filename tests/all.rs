@@ -1571,6 +1571,44 @@ async fn gnu_x_typeflag_is_not_a_solaris_pax_extension() {
 }
 
 #[tokio::test]
+async fn orphaned_gnu_sparse_pax_metadata_is_rejected() {
+    let cases: &[&[u8]] = &[
+        b"34 GNU.sparse.name=sparse-aliased\n",
+        b"21 path=path-aliased\n34 GNU.sparse.name=sparse-aliased\n",
+        b"34 GNU.sparse.name=sparse-aliased\n21 path=path-aliased\n",
+    ];
+
+    for &extensions in cases {
+        let mut builder = Builder::new(Vec::new());
+
+        let mut extension = Header::new_ustar();
+        extension.set_size(extensions.len() as u64);
+        extension.set_entry_type(EntryType::new(b'x'));
+        t!(builder.append_data(&mut extension, "pax", extensions).await);
+
+        let mut file = Header::new_ustar();
+        file.set_size(4);
+        t!(builder
+            .append_data(&mut file, "raw-name", &b"DATA"[..])
+            .await);
+
+        let bytes = t!(builder.into_inner().await);
+        let mut archive = Archive::new(&bytes[..]);
+        let mut entries = t!(archive.entries());
+
+        let error = entries
+            .next()
+            .await
+            .unwrap()
+            .expect_err("expected orphaned GNU sparse PAX metadata to be rejected");
+        assert_eq!(
+            error.to_string(),
+            "orphaned GNU sparse pax metadata is not supported"
+        );
+    }
+}
+
+#[tokio::test]
 async fn long_name_trailing_nul() {
     let mut b = Builder::new(Vec::<u8>::new());
 
