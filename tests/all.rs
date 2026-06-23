@@ -139,6 +139,42 @@ async fn reading_files() {
 }
 
 #[tokio::test]
+async fn unknown_typeflag_entry_payload_is_readable() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut mystery = Header::new_ustar();
+    mystery.set_size(4);
+    mystery.set_entry_type(EntryType::new(b'Z'));
+    t!(builder
+        .append_data(&mut mystery, "mystery", &b"DATA"[..])
+        .await);
+
+    let mut after = Header::new_ustar();
+    after.set_size(5);
+    t!(builder
+        .append_data(&mut after, "after", &b"after"[..])
+        .await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let mut mystery = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(mystery.path_bytes()), b"mystery");
+    let mut mystery_data = Vec::new();
+    t!(mystery.read_to_end(&mut mystery_data).await);
+    assert_eq!(mystery_data, b"DATA");
+
+    let mut after = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(after.path_bytes()), b"after");
+    let mut after_data = String::new();
+    t!(after.read_to_string(&mut after_data).await);
+    assert_eq!(after_data, "after");
+
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn writing_files() {
     let mut ar = Builder::new(Vec::new());
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
