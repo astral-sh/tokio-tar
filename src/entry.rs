@@ -546,11 +546,17 @@ impl<R: Read + Unpin> EntryFields<R> {
             None => {
                 if let Some(ref pax) = self.pax_extensions {
                     // Check for malformed PAX extensions and return hard error
+                    let mut path = None;
                     for ext in pax_extensions(pax) {
                         let ext = ext?; // Propagate error instead of silently dropping
                         if ext.key_bytes() == b"path" {
-                            return Ok(Cow::Borrowed(ext.value_bytes()));
+                            // POSIX specifies that the last extended-header record for an
+                            // attribute takes precedence, so overwrite earlier path values.
+                            path = Some(ext.value_bytes());
                         }
+                    }
+                    if let Some(path) = path {
+                        return Ok(Cow::Borrowed(path));
                     }
                 }
                 Ok(self.header.path_bytes())

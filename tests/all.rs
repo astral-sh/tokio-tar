@@ -2636,3 +2636,27 @@ async fn pax_typeflag_on_gnu_header_is_rejected() {
         "extension typeflag is not permitted on an unrecognized header"
     );
 }
+
+#[tokio::test]
+async fn duplicate_pax_paths_use_last_value() {
+    let mut builder = Builder::new(Vec::new());
+
+    let pax = b"19 path=first-name\n20 path=second-name\n";
+    let mut header = Header::new_ustar();
+    t!(header.set_path("PaxHeaders/x"));
+    header.set_entry_type(EntryType::new(b'x'));
+    header.set_size(pax.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &pax[..]).await);
+
+    let mut header = Header::new_ustar();
+    t!(header.set_path("raw-name"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let entry = t!(t!(archive.entries()).next().await.unwrap());
+    assert_eq!(&*t!(entry.path_bytes()), b"second-name");
+}
