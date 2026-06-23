@@ -1726,6 +1726,23 @@ async fn sparse_with_trailing() {
 }
 
 #[tokio::test]
+async fn sparse_continuation_partial_record_is_rejected() {
+    // `sparse_ext.txt` begins an extended sparse header at offset 2560. Its
+    // first two sparse chunks are populated; make the first otherwise-empty
+    // chunk contain either an offset or a length without its paired field.
+    for field_offset in [0, 12] {
+        let mut bytes = tar!("sparse.tar").to_vec();
+        bytes[2560 + 2 * 24 + field_offset] = b'1';
+        let mut ar = Archive::new(&bytes[..]);
+        let mut entries = t!(ar.entries());
+
+        assert!(entries.next().await.unwrap().is_ok());
+        assert!(entries.next().await.unwrap().is_ok());
+        assert!(matches!(entries.next().await, Some(Err(_))));
+    }
+}
+
+#[tokio::test]
 async fn path_separators() {
     let mut ar = Builder::new(Vec::new());
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
