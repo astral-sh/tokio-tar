@@ -1198,6 +1198,38 @@ async fn append_local_pax_header(builder: &mut Builder<Vec<u8>>) {
 }
 
 #[tokio::test]
+async fn pending_pax_record_at_archive_end_is_rejected() {
+    let mut ar = Archive::new(tar!("diff-024-pending-pax-boundary.tar"));
+    let mut entries = t!(ar.entries());
+
+    let err = match entries.next().await.unwrap() {
+        Ok(_) => panic!("expected unterminated PAX state to be rejected"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("extension entry was not followed by a member"));
+}
+
+#[tokio::test]
+async fn pending_pax_record_does_not_cross_ignored_terminator() {
+    let mut bytes = tar!("diff-024-pending-pax-boundary.tar").to_vec();
+    bytes.extend_from_slice(tar!("simple.tar"));
+
+    let builder = ArchiveBuilder::new(Cursor::new(bytes)).set_ignore_zeros(true);
+    let mut ar = builder.build();
+    let mut entries = t!(ar.entries());
+
+    let err = match entries.next().await.unwrap() {
+        Ok(_) => panic!("expected PAX state at a terminator to be rejected"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("extension entry was not followed by a member"));
+}
+
+#[tokio::test]
 async fn pax_pending_interrupted() {
     use std::pin::Pin;
 
