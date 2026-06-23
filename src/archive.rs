@@ -716,6 +716,10 @@ fn poll_next_raw<R: Read + Unpin>(
 
     // the size above will be overriden by the pax data if it has a size field.
     // same for uid and gid, which will be overridden in the header itself.
+    let mut has_gnu_sparse_metadata = false;
+    let mut has_recognized_gnu_sparse_format = false;
+    let mut sparse_major_1 = false;
+    let mut sparse_minor_0 = false;
     if let Some(pax) = pax_extensions_data
         .filter(|_| !is_extension_header)
         .map(pax_extensions)
@@ -728,6 +732,8 @@ fn poll_next_raw<R: Read + Unpin>(
             let Ok(key) = extension.key() else {
                 continue;
             };
+
+            has_gnu_sparse_metadata |= key.starts_with("GNU.sparse.");
 
             match key {
                 "size" => {
@@ -790,11 +796,31 @@ fn poll_next_raw<R: Read + Unpin>(
                     }
                 }
 
+                "GNU.sparse.map" | "GNU.sparse.size" => {
+                    has_recognized_gnu_sparse_format = true;
+                }
+
+                "GNU.sparse.major" => {
+                    sparse_major_1 = extension.value().ok() == Some("1");
+                }
+
+                "GNU.sparse.minor" => {
+                    sparse_minor_0 = extension.value().ok() == Some("0");
+                }
+
                 _ => {
                     continue;
                 }
             }
         }
+    }
+
+    if has_gnu_sparse_metadata
+        && !(has_recognized_gnu_sparse_format || sparse_major_1 && sparse_minor_0)
+    {
+        return Poll::Ready(Some(Err(other(
+            "orphaned GNU sparse pax metadata is not supported",
+        ))));
     }
 
     let mut data = VecDeque::with_capacity(1);
