@@ -2348,3 +2348,44 @@ async fn gnu_long_linkname_stops_at_first_nul() {
 
     assert_eq!(&*t!(entry.link_name_bytes()).unwrap(), b"target");
 }
+
+#[tokio::test]
+async fn empty_read_does_not_report_eof_for_nonempty_entry() {
+    let mut builder = Builder::new(Vec::<u8>::new());
+    let mut header = Header::new_gnu();
+    t!(header.set_path("body"));
+    header.set_size(4);
+    header.set_cksum();
+    t!(builder.append(&header, &b"data"[..]).await);
+
+    let contents = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&contents[..]);
+    let mut entries = t!(archive.entries());
+    let mut entry = t!(entries.next().await.unwrap());
+
+    let mut empty = [];
+    assert_eq!(t!(entry.read(&mut empty).await), 0);
+
+    let mut body = Vec::new();
+    t!(entry.read_to_end(&mut body).await);
+    assert_eq!(body, b"data");
+}
+
+#[tokio::test]
+async fn truncated_entry_reports_eof_while_reading_body() {
+    let bytes = tar!("diff-039-truncated-entry-body.tar");
+    let mut archive = Archive::new(bytes);
+    let mut entries = t!(archive.entries());
+    let mut entry = t!(entries.next().await.unwrap());
+
+    assert_eq!(&*t!(entry.path_bytes()), b"aaa");
+    let mut body = Vec::new();
+    let err = entry.read_to_end(&mut body).await.unwrap_err();
+    assert!(body.is_empty());
+    assert!(
+        err.to_string()
+            .contains("unexpected EOF while reading archive entry data"),
+        "bad error: {}",
+        err
+    );
+}

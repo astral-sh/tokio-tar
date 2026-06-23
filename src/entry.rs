@@ -1154,16 +1154,29 @@ impl<R: Read + Unpin> Read for EntryFields<R> {
         into: &mut io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if into.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         loop {
             if this.read_state.is_none() {
                 this.read_state = this.data.pop_front();
             }
 
             if let Some(ref mut io) = &mut this.read_state {
+                let expected_data = match io {
+                    EntryIo::Data(reader) => reader.limit() > 0,
+                    EntryIo::Pad(_) => false,
+                };
                 let start = into.filled().len();
                 let ret = Pin::new(io).poll_read(cx, into);
                 match ret {
                     Poll::Ready(Ok(())) if into.filled().len() == start => {
+                        if expected_data {
+                            return Poll::Ready(Err(other(
+                                "unexpected EOF while reading archive entry data",
+                            )));
+                        }
                         this.read_state = None;
                         if this.data.is_empty() {
                             return Poll::Ready(Ok(()));
