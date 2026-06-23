@@ -1401,6 +1401,47 @@ async fn pax_owner_names_override_entry_metadata() {
     assert!(entries.next().await.is_none());
 }
 
+#[tokio::test]
+async fn last_pax_owner_metadata_wins() {
+    let mut owner_metadata = pax_record("uid", b"111");
+    owner_metadata.extend(pax_record("uid", b"222"));
+    owner_metadata.extend(pax_record("gid", b"333"));
+    owner_metadata.extend(pax_record("gid", b"444"));
+    owner_metadata.extend(pax_record("uname", b"pax-user-first"));
+    owner_metadata.extend(pax_record("uname", b"pax-user-last"));
+    owner_metadata.extend(pax_record("gname", b"pax-group-first"));
+    owner_metadata.extend(pax_record("gname", b"pax-group-last"));
+
+    let mut builder = Builder::new(Vec::new());
+    let mut extension = Header::new_ustar();
+    extension.set_size(owner_metadata.len() as u64);
+    extension.set_entry_type(EntryType::new(b'x'));
+    t!(builder
+        .append_data(&mut extension, "pax", &owner_metadata[..])
+        .await);
+
+    let mut file = Header::new_ustar();
+    file.set_size(4);
+    file.set_uid(1);
+    file.set_gid(2);
+    t!(file.set_username("raw-user"));
+    t!(file.set_groupname("raw-group"));
+    t!(builder.append_data(&mut file, "file", &b"DATA"[..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let file = t!(entries.next().await.unwrap());
+    assert_eq!(t!(file.header().uid()), 222);
+    assert_eq!(t!(file.header().gid()), 444);
+    assert_eq!(file.username_bytes(), Some(&b"pax-user-last"[..]));
+    assert_eq!(file.groupname_bytes(), Some(&b"pax-group-last"[..]));
+    assert_eq!(t!(file.header().username()), Some("pax-user-last"));
+    assert_eq!(t!(file.header().groupname()), Some("pax-group-last"));
+    assert!(entries.next().await.is_none());
+}
+
 fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     let body_len = 1 + key.len() + 1 + value.len() + 1;
     let mut len = body_len + 1;
