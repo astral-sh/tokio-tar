@@ -1332,7 +1332,7 @@ impl fmt::Debug for DebugSparseHeaders<'_> {
 impl GnuSparseHeader {
     /// Returns true if block is empty
     pub fn is_empty(&self) -> bool {
-        self.offset[0] == 0 || self.numbytes[0] == 0
+        self.offset[0] == 0 && self.numbytes[0] == 0
     }
 
     /// Offset of the block from the start of the file
