@@ -689,6 +689,11 @@ fn poll_next_raw<R: Read + Unpin>(
     if sum != cksum {
         return Poll::Ready(Some(Err(other("archive header checksum mismatch"))));
     }
+    if header.is_ambiguous_nul_version_ustar() {
+        return Poll::Ready(Some(Err(other(
+            "NUL-version USTAR header is ambiguous and not supported",
+        ))));
+    }
 
     if archive.inner.pax_only && !is_pax_header(header) {
         return Poll::Ready(Some(Err(other(

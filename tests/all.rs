@@ -2512,3 +2512,27 @@ async fn truncated_entry_reports_eof_while_reading_body() {
         err
     );
 }
+
+#[tokio::test]
+async fn nul_version_ustar_headers_are_rejected() {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut header = Header::new_ustar();
+    t!(header.set_path("nul-version-owner"));
+    t!(header.set_username("user"));
+    t!(header.set_groupname("group"));
+    t!(header.set_device_major(1));
+    t!(header.set_device_minor(2));
+    header.as_ustar_mut().unwrap().version = [0, 0];
+    header.set_size(0);
+    header.set_cksum();
+    t!(builder.append(&header, &[][..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let err = t!(archive.entries()).next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "NUL-version USTAR header is ambiguous and not supported"
+    );
+}
