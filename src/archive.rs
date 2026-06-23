@@ -393,6 +393,8 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             let entry = if let Some(entry) = self.pending.take() {
                 entry
             } else {
+                let has_pending_extension =
+                    self.gnu_longname.0 || self.gnu_longlink.0 || self.pax_extensions.0;
                 let (next, current_header, current_header_pos, _, pax_extensions) =
                     &mut self.current;
                 match futures_core::ready!(poll_next_raw(
@@ -403,16 +405,24 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                     cx,
                     pax_extensions.as_deref(),
                     true,
+                    has_pending_extension,
                 )) {
                     Some(Ok(entry)) => entry,
                     Some(Err(err)) => return Poll::Ready(Some(Err(err))),
-                    None if self.archive.inner.pax_only && self.pax_extensions.0 => {
-                        self.pax_extensions.0 = false;
-                        return Poll::Ready(Some(Err(other(
-                            "local pax header is not followed by an archive entry",
-                        ))));
+                    None => {
+                        if self.archive.inner.pax_only && self.pax_extensions.0 {
+                            self.pax_extensions.0 = false;
+                            return Poll::Ready(Some(Err(other(
+                                "local pax header is not followed by an archive entry",
+                            ))));
+                        }
+                        if self.gnu_longname.0 || self.gnu_longlink.0 || self.pax_extensions.0 {
+                            return Poll::Ready(Some(Err(other(
+                                "extension entry was not followed by a member",
+                            ))));
+                        }
+                        return Poll::Ready(None);
                     }
-                    None => return Poll::Ready(None),
                 }
             };
 
@@ -597,10 +607,12 @@ impl<R: Read + Unpin> Stream for RawEntries<R> {
             cx,
             None,
             false,
+            false,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_next_raw<R: Read + Unpin>(
     mut archive: Archive<R>,
     next: &mut u64,
@@ -609,6 +621,7 @@ fn poll_next_raw<R: Read + Unpin>(
     cx: &mut Context<'_>,
     pax_extensions_data: Option<&[u8]>,
     apply_pax_header_fields: bool,
+    has_pending_extension: bool,
 ) -> Poll<Option<io::Result<Entry<Archive<R>>>>> {
     let mut header_pos = *next;
 
@@ -645,6 +658,15 @@ fn poll_next_raw<R: Read + Unpin>(
         if !header.as_bytes().iter().all(|i| *i == 0) {
             *next += BLOCK_SIZE;
             break;
+        }
+
+        if has_pending_extension {
+            if archive.inner.pax_only {
+                return Poll::Ready(None);
+            }
+            return Poll::Ready(Some(Err(other(
+                "extension entry was not followed by a member",
+            ))));
         }
 
         if !archive.inner.ignore_zeros {
