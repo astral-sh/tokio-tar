@@ -2761,3 +2761,16 @@ async fn duplicate_pax_paths_use_last_value() {
     let entry = t!(t!(archive.entries()).next().await.unwrap());
     assert_eq!(&*t!(entry.path_bytes()), b"second-name");
 }
+
+#[tokio::test]
+async fn extended_sparse_data_position_skips_extension_headers() {
+    let mut archive = Archive::new(Cursor::new(tar!("sparse.tar")));
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*entry.header().path_bytes(), b"sparse_ext.txt");
+    assert_eq!(entry.raw_file_position(), 3072);
+}
