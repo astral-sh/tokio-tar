@@ -1460,6 +1460,23 @@ fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     record
 }
 
+async fn local_pax_record_archive(entry_type: EntryType, record: &[u8]) -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+
+    let mut extension = Header::new_ustar();
+    extension.set_size(record.len() as u64);
+    extension.set_entry_type(entry_type);
+    t!(builder.append_data(&mut extension, "pax", record).await);
+
+    let mut file = Header::new_ustar();
+    file.set_size(4);
+    t!(builder
+        .append_data(&mut file, "raw-name", &b"DATA"[..])
+        .await);
+
+    t!(builder.into_inner().await)
+}
+
 #[tokio::test]
 async fn pax_long_owner_names_are_exposed_by_entry() {
     let uname = "pax-user-name-longer-than-the-fixed-width-header-slot";
@@ -1496,35 +1513,78 @@ async fn pax_long_owner_names_are_exposed_by_entry() {
 }
 
 #[tokio::test]
-async fn pax_empty_owner_names_delete_entry_metadata() {
-    let mut owner_names = pax_record("uname", b"");
-    owner_names.extend(pax_record("gname", b""));
+async fn pax_empty_owner_names_are_rejected() {
+    for key in ["uname", "gname"] {
+        let record = pax_record(key, b"");
+        let bytes = local_pax_record_archive(EntryType::XHeader, &record).await;
+        let mut archive = Archive::new(&bytes[..]);
+        let mut entries = t!(archive.entries());
 
+        let err = entries.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "empty values are not supported in local pax extensions"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_empty_local_pax_values_are_rejected() {
+    let record = pax_record("VENDOR.unknown", b"");
+
+    for entry_type in [EntryType::XHeader, EntryType::SolarisXHeader] {
+        let bytes = local_pax_record_archive(entry_type, &record).await;
+        let mut archive = Archive::new(&bytes[..]);
+        let mut entries = t!(archive.entries());
+
+        let err = entries.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "empty values are not supported in local pax extensions"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_nonempty_local_pax_values_are_accepted() {
+    let record = pax_record("VENDOR.unknown", b"opaque");
+
+    for entry_type in [EntryType::XHeader, EntryType::SolarisXHeader] {
+        let bytes = local_pax_record_archive(entry_type, &record).await;
+        let mut archive = Archive::new(&bytes[..]);
+        let mut entries = t!(archive.entries());
+
+        let mut file = t!(entries.next().await.unwrap());
+        assert_eq!(&*t!(file.path_bytes()), b"raw-name");
+        let mut contents = Vec::new();
+        t!(file.read_to_end(&mut contents).await);
+        assert_eq!(contents, b"DATA");
+        assert!(entries.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn empty_global_pax_values_remain_visible() {
+    let record = pax_record("comment", b"");
     let mut builder = Builder::new(Vec::new());
     let mut extension = Header::new_ustar();
-    extension.set_size(owner_names.len() as u64);
-    extension.set_entry_type(EntryType::new(b'x'));
+    extension.set_size(record.len() as u64);
+    extension.set_entry_type(EntryType::XGlobalHeader);
     t!(builder
-        .append_data(&mut extension, "pax", &owner_names[..])
+        .append_data(&mut extension, "global-pax", &record[..])
         .await);
-
-    let mut file = Header::new_ustar();
-    file.set_size(4);
-    t!(file.set_username("raw-user"));
-    t!(file.set_groupname("raw-group"));
-    t!(builder.append_data(&mut file, "file", &b"DATA"[..]).await);
 
     let bytes = t!(builder.into_inner().await);
     let mut archive = Archive::new(&bytes[..]);
     let mut entries = t!(archive.entries());
 
-    let file = t!(entries.next().await.unwrap());
-    assert_eq!(file.username_bytes(), None);
-    assert_eq!(file.groupname_bytes(), None);
-    assert_eq!(t!(file.username()), None);
-    assert_eq!(t!(file.groupname()), None);
-    assert_eq!(t!(file.header().username()), Some("raw-user"));
-    assert_eq!(t!(file.header().groupname()), Some("raw-group"));
+    let mut entry = t!(entries.next().await.unwrap());
+    assert_eq!(entry.header().entry_type(), EntryType::XGlobalHeader);
+    let mut extensions = t!(entry.pax_extensions().await).unwrap();
+    let extension = t!(extensions.next().unwrap());
+    assert_eq!(extension.key_bytes(), b"comment");
+    assert_eq!(extension.value_bytes(), b"");
+    assert!(extensions.next().is_none());
     assert!(entries.next().await.is_none());
 }
 

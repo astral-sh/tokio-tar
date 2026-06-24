@@ -545,6 +545,11 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                         Ok(extension) => extension,
                         Err(err) => return Poll::Ready(Some(Err(err))),
                     };
+                    if extension.value_bytes().is_empty() {
+                        return Poll::Ready(Some(Err(other(
+                            "empty values are not supported in local pax extensions",
+                        ))));
+                    }
                     if self.gnu_longname.0 && extension.key_bytes() == b"path" {
                         return Poll::Ready(Some(Err(other(
                             "ambiguous path: pax path and GNU longname describe the same member",
