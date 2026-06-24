@@ -1021,6 +1021,10 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                 for block in ext.sparse.iter() {
                     add_block(block)?;
                 }
+                entry.file_pos = entry
+                    .file_pos
+                    .checked_add(BLOCK_SIZE)
+                    .ok_or_else(|| other("position overflow"))?;
             }
         }
     }
