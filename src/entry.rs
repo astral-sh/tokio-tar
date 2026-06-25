@@ -14,6 +14,10 @@ use std::{
     marker,
     path::{Component, Path, PathBuf},
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -122,6 +126,26 @@ pub struct EntryFields<R: Read + Unpin> {
     pub overwrite: bool,
     pub allow_external_symlinks: bool,
     pub(crate) read_state: Option<EntryIo<R>>,
+    pub(crate) unpack_poisoned: Arc<AtomicBool>,
+}
+
+struct UnpackCancellationGuard {
+    poisoned: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl UnpackCancellationGuard {
+    fn complete(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnpackCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
@@ -141,6 +165,10 @@ impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
             .field("overwrite", &self.overwrite)
             .field("allow_external_symlinks", &self.allow_external_symlinks)
             .field("read_state", &self.read_state)
+            .field(
+                "unpack_poisoned",
+                &self.unpack_poisoned.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -324,7 +352,10 @@ impl<R: Read + Unpin> Entry<R> {
     /// # Ok(()) }) }
     /// ```
     pub async fn unpack<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Unpacked> {
-        self.fields.unpack(None, dst.as_ref()).await
+        let guard = self.fields.unpack_guard()?;
+        let result = self.fields.unpack(None, dst.as_ref()).await;
+        guard.complete();
+        result
     }
 
     /// Extracts this file under the specified path, avoiding security issues.
@@ -359,9 +390,18 @@ impl<R: Read + Unpin> Entry<R> {
     /// # Ok(()) }) }
     /// ```
     pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
-        let dst = dst.as_ref().canonicalize()?;
+        let guard = self.fields.unpack_guard()?;
+        let dst = match dst.as_ref().canonicalize() {
+            Ok(dst) => dst,
+            Err(err) => {
+                guard.complete();
+                return Err(err);
+            }
+        };
         let mut memo = FxHashSet::default();
-        self.fields.unpack_in(&dst, &mut memo).await
+        let result = self.fields.unpack_in(&dst, &mut memo).await;
+        guard.complete();
+        result
     }
 
     /// Extracts this file under the specified path, avoiding security issues.
@@ -374,7 +414,10 @@ impl<R: Read + Unpin> Entry<R> {
         dst: P,
         memo: &mut FxHashSet<PathBuf>,
     ) -> io::Result<Option<PathBuf>> {
-        self.fields.unpack_in(dst.as_ref(), memo).await
+        let guard = self.fields.unpack_guard()?;
+        let result = self.fields.unpack_in(dst.as_ref(), memo).await;
+        guard.complete();
+        result
     }
 
     /// Indicate whether extended file attributes (xattrs on Unix) are preserved
@@ -426,6 +469,24 @@ impl<R: Read + Unpin> Read for Entry<R> {
 }
 
 impl<R: Read + Unpin> EntryFields<R> {
+    fn unpack_guard(&self) -> io::Result<UnpackCancellationGuard> {
+        self.ensure_unpack_not_poisoned()?;
+        Ok(UnpackCancellationGuard {
+            poisoned: Arc::clone(&self.unpack_poisoned),
+            armed: true,
+        })
+    }
+
+    fn ensure_unpack_not_poisoned(&self) -> io::Result<()> {
+        if self.unpack_poisoned.load(Ordering::Acquire) {
+            Err(other(
+                "archive entry cannot be reused after a cancelled unpack operation",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn from(entry: Entry<R>) -> Self {
         entry.fields
     }
@@ -1076,6 +1137,10 @@ impl<R: Read + Unpin> Read for EntryFields<R> {
         into: &mut io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if let Err(err) = this.ensure_unpack_not_poisoned() {
+            return Poll::Ready(Err(err));
+        }
+
         loop {
             if this.read_state.is_none() {
                 this.read_state = this.data.pop_front();

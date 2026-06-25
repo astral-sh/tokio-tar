@@ -675,6 +675,7 @@ fn poll_next_raw<R: Read + Unpin>(
         overwrite: archive.inner.overwrite,
         allow_external_symlinks: archive.inner.allow_external_symlinks,
         read_state: None,
+        unpack_poisoned: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Store where the next entry is, rounding up by 512 bytes (the size of
