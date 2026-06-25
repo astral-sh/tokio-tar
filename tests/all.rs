@@ -1583,3 +1583,83 @@ async fn pax_size_does_not_apply_to_extension_headers() {
         entries
     );
 }
+
+#[tokio::test]
+async fn cancelled_pax_extensions_resume_the_partial_payload() {
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::task::Poll;
+
+    struct ChunkedPendingReader {
+        bytes: Vec<u8>,
+        pos: usize,
+        armed: Arc<AtomicBool>,
+        pending: bool,
+        chunk_size: usize,
+    }
+
+    impl AsyncRead for ChunkedPendingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.armed.load(Ordering::SeqCst) && self.pending {
+                self.pending = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            let mut amount = buf.remaining().min(self.bytes.len() - self.pos);
+            if self.armed.load(Ordering::SeqCst) {
+                amount = amount.min(self.chunk_size);
+                self.pending = true;
+            }
+            let end = self.pos + amount;
+            buf.put_slice(&self.bytes[self.pos..end]);
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let first_record = b"11 uid=123\n".to_vec();
+    let mut record = first_record.clone();
+    record.extend_from_slice(b"18 comment=opaque\n");
+    let mut builder = Builder::new(Vec::new());
+    let mut header = Header::new_ustar();
+    header.set_entry_type(EntryType::XGlobalHeader);
+    header.set_size(record.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, &record[..]).await);
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let source = ChunkedPendingReader {
+        bytes: t!(builder.into_inner().await),
+        pos: 0,
+        armed: armed.clone(),
+        pending: false,
+        chunk_size: first_record.len(),
+    };
+    let mut archive = Archive::new(source);
+    let mut entries = t!(archive.entries());
+    let mut entry = t!(entries.next().await.unwrap());
+    armed.store(true, Ordering::SeqCst);
+
+    let mut first = Box::pin(entry.pax_extensions());
+    let first_poll = poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx))).await;
+    assert!(first_poll.is_pending());
+    drop(first);
+
+    let mut extensions = t!(entry.pax_extensions().await).unwrap();
+    let first = t!(extensions.next().unwrap());
+    assert_eq!(first.key_bytes(), b"uid");
+    assert_eq!(first.value_bytes(), b"123");
+    let second = t!(extensions.next().unwrap());
+    assert_eq!(second.key_bytes(), b"comment");
+    assert_eq!(second.value_bytes(), b"opaque");
+    assert!(extensions.next().is_none());
+}

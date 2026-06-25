@@ -484,6 +484,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             }
             if self.pax_extensions.0 {
                 fields.pax_extensions = self.pax_extensions.1.take();
+                fields.pax_extensions_read = true;
                 self.pax_extensions.0 = false;
                 self.current.4 = None;
             }
@@ -669,6 +670,7 @@ fn poll_next_raw<R: Read + Unpin>(
         long_pathname: None,
         long_linkname: None,
         pax_extensions: None,
+        pax_extensions_read: false,
         unpack_xattrs: archive.inner.unpack_xattrs,
         preserve_permissions: archive.inner.preserve_permissions,
         preserve_mtime: archive.inner.preserve_mtime,

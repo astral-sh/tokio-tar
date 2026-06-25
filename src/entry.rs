@@ -111,6 +111,7 @@ pub struct EntryFields<R: Read + Unpin> {
     pub long_pathname: Option<Vec<u8>>,
     pub long_linkname: Option<Vec<u8>>,
     pub pax_extensions: Option<Vec<u8>>,
+    pub(crate) pax_extensions_read: bool,
     pub header: Header,
     pub size: u64,
     pub header_pos: u64,
@@ -130,6 +131,7 @@ impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
             .field("long_pathname", &self.long_pathname)
             .field("long_linkname", &self.long_linkname)
             .field("pax_extensions", &self.pax_extensions)
+            .field("pax_extensions_read", &self.pax_extensions_read)
             .field("header", &self.header)
             .field("size", &self.size)
             .field("header_pos", &self.header_pos)
@@ -449,13 +451,6 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
     }
 
-    pub async fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        // Preallocate some data but don't let ourselves get too crazy now.
-        let cap = cmp::min(self.size, 128 * 1024);
-        let mut v = Vec::with_capacity(cap as usize);
-        self.read_to_end(&mut v).await.map(|_| v)
-    }
-
     fn path(&self) -> io::Result<Cow<'_, Path>> {
         bytes2path(self.path_bytes()?)
     }
@@ -525,13 +520,30 @@ impl<R: Read + Unpin> EntryFields<R> {
     }
 
     async fn pax_extensions(&mut self) -> io::Result<Option<PaxExtensions<'_>>> {
-        if self.pax_extensions.is_none() {
+        if !self.pax_extensions_read {
             if !self.header.entry_type().is_pax_global_extensions()
                 && !self.header.entry_type().is_pax_local_extensions()
             {
                 return Ok(None);
             }
-            self.pax_extensions = Some(self.read_all().await?);
+
+            if self.pax_extensions.is_none() {
+                let cap = cmp::min(self.size, 128 * 1024);
+                self.pax_extensions = Some(Vec::with_capacity(cap as usize));
+            }
+
+            let mut chunk = [0; 8192];
+            loop {
+                let read = self.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                self.pax_extensions
+                    .as_mut()
+                    .unwrap()
+                    .extend_from_slice(&chunk[..read]);
+            }
+            self.pax_extensions_read = true;
         }
         Ok(Some(pax_extensions(self.pax_extensions.as_ref().unwrap())))
     }
