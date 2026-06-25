@@ -1583,3 +1583,93 @@ async fn pax_size_does_not_apply_to_extension_headers() {
         entries
     );
 }
+
+#[tokio::test]
+async fn cancelled_unpack_poisoned_entry_cannot_be_reused() {
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::task::Poll;
+
+    struct ChunkedPendingReader {
+        bytes: Vec<u8>,
+        pos: usize,
+        armed: Arc<AtomicBool>,
+        data_read: Arc<AtomicUsize>,
+        pending: bool,
+    }
+
+    impl AsyncRead for ChunkedPendingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.armed.load(Ordering::SeqCst) && self.pending {
+                self.pending = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            let mut amount = buf.remaining().min(self.bytes.len() - self.pos);
+            if self.armed.load(Ordering::SeqCst) {
+                amount = amount.min(5);
+                self.pending = true;
+                self.data_read.fetch_add(amount, Ordering::SeqCst);
+            }
+            let end = self.pos + amount;
+            buf.put_slice(&self.bytes[self.pos..end]);
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let contents = b"0123456789";
+    let mut archive_builder = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(contents.len() as u64);
+    header.set_cksum();
+    t!(archive_builder
+        .append_data(&mut header, "file", &contents[..])
+        .await);
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let data_read = Arc::new(AtomicUsize::new(0));
+    let source = ChunkedPendingReader {
+        bytes: t!(archive_builder.into_inner().await),
+        pos: 0,
+        armed: armed.clone(),
+        data_read: data_read.clone(),
+        pending: false,
+    };
+    let mut archive = Archive::new(source);
+    let mut entries = t!(archive.entries());
+    let mut entry = t!(entries.next().await.unwrap());
+    armed.store(true, Ordering::SeqCst);
+
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("output");
+    let mut first = Box::pin(entry.unpack(&output));
+    loop {
+        let first_poll = poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending());
+        if data_read.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(first);
+
+    let retry = entry.unpack(&output).await.unwrap_err();
+    assert_eq!(
+        retry.to_string(),
+        "archive entry cannot be reused after a cancelled unpack operation"
+    );
+
+    let mut remaining = Vec::new();
+    let read = entry.read_to_end(&mut remaining).await.unwrap_err();
+    assert_eq!(read.to_string(), retry.to_string());
+}
