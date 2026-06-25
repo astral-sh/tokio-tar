@@ -2,7 +2,15 @@ use crate::{
     header::{path2bytes, HeaderMode},
     other, EntryType, Header,
 };
-use std::{fs::Metadata, path::Path, str};
+use std::{
+    fs::Metadata,
+    path::Path,
+    str,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tokio::{
     fs,
     io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
@@ -18,6 +26,26 @@ pub struct Builder<W: Write + Unpin + Send> {
     finished: bool,
     obj: Option<W>,
     cancellation: Option<tokio::sync::oneshot::Sender<W>>,
+    write_poisoned: Arc<AtomicBool>,
+}
+
+struct WriteCancellationGuard {
+    poisoned: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl WriteCancellationGuard {
+    fn complete(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WriteCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 
 const TERMINATION: &[u8; 1024] = &[0; 1024];
@@ -42,6 +70,7 @@ impl<W: Write + Unpin + Send + 'static> Builder<W> {
             finished: false,
             obj: Some(obj),
             cancellation: Some(tx),
+            write_poisoned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -59,6 +88,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
             finished: false,
             obj: Some(obj),
             cancellation: None,
+            write_poisoned: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -152,9 +182,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
         header: &Header,
         mut data: R,
     ) -> io::Result<()> {
-        append(self.get_mut(), header, &mut data).await?;
-
-        Ok(())
+        let guard = self.write_guard()?;
+        let result = append(self.get_mut(), header, &mut data).await;
+        guard.complete();
+        result
     }
 
     /// Adds a new entry to this archive with the specified path.
@@ -207,11 +238,15 @@ impl<W: Write + Unpin + Send> Builder<W> {
         path: P,
         data: R,
     ) -> io::Result<()> {
-        prepare_header_path(self.get_mut(), header, path.as_ref()).await?;
-        header.set_cksum();
-        self.append(header, data).await?;
-
-        Ok(())
+        let guard = self.write_guard()?;
+        let result = async {
+            prepare_header_path(self.get_mut(), header, path.as_ref()).await?;
+            header.set_cksum();
+            self.append(header, data).await
+        }
+        .await;
+        guard.complete();
+        result
     }
 
     /// Adds a file on the local filesystem to this archive.
@@ -243,10 +278,12 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// # Ok(()) }) }
     /// ```
     pub async fn append_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+        let guard = self.write_guard()?;
         let mode = self.mode;
         let follow = self.follow;
-        append_path_with_name(self.get_mut(), path.as_ref(), None, mode, follow).await?;
-        Ok(())
+        let result = append_path_with_name(self.get_mut(), path.as_ref(), None, mode, follow).await;
+        guard.complete();
+        result
     }
 
     /// Adds a file on the local filesystem to this archive under another name.
@@ -283,17 +320,19 @@ impl<W: Write + Unpin + Send> Builder<W> {
         path: P,
         name: N,
     ) -> io::Result<()> {
+        let guard = self.write_guard()?;
         let mode = self.mode;
         let follow = self.follow;
-        append_path_with_name(
+        let result = append_path_with_name(
             self.get_mut(),
             path.as_ref(),
             Some(name.as_ref()),
             mode,
             follow,
         )
-        .await?;
-        Ok(())
+        .await;
+        guard.complete();
+        result
     }
 
     /// Adds a file to this archive with the given path as the name of the file
@@ -331,9 +370,11 @@ impl<W: Write + Unpin + Send> Builder<W> {
         path: P,
         file: &mut fs::File,
     ) -> io::Result<()> {
+        let guard = self.write_guard()?;
         let mode = self.mode;
-        append_file(self.get_mut(), path.as_ref(), file, mode).await?;
-        Ok(())
+        let result = append_file(self.get_mut(), path.as_ref(), file, mode).await;
+        guard.complete();
+        result
     }
 
     /// Adds a directory to this archive with the given path as the name of the
@@ -370,9 +411,11 @@ impl<W: Write + Unpin + Send> Builder<W> {
         P: AsRef<Path>,
         Q: AsRef<Path>,
     {
+        let guard = self.write_guard()?;
         let mode = self.mode;
-        append_dir(self.get_mut(), path.as_ref(), src_path.as_ref(), mode).await?;
-        Ok(())
+        let result = append_dir(self.get_mut(), path.as_ref(), src_path.as_ref(), mode).await;
+        guard.complete();
+        result
     }
 
     /// Adds a directory and all of its contents (recursively) to this archive
@@ -408,17 +451,19 @@ impl<W: Write + Unpin + Send> Builder<W> {
         P: AsRef<Path>,
         Q: AsRef<Path>,
     {
+        let guard = self.write_guard()?;
         let mode = self.mode;
         let follow = self.follow;
-        append_dir_all(
+        let result = append_dir_all(
             self.get_mut(),
             path.as_ref(),
             src_path.as_ref(),
             mode,
             follow,
         )
-        .await?;
-        Ok(())
+        .await;
+        guard.complete();
+        result
     }
 
     /// Finish writing this archive, emitting the termination sections.
@@ -429,12 +474,31 @@ impl<W: Write + Unpin + Send> Builder<W> {
     ///
     /// In most situations the `into_inner` method should be preferred.
     pub async fn finish(&mut self) -> io::Result<()> {
+        self.ensure_not_poisoned()?;
         if self.finished {
             return Ok(());
         }
         self.finished = true;
         self.get_mut().write_all(&[0; 1024]).await?;
         Ok(())
+    }
+
+    fn write_guard(&self) -> io::Result<WriteCancellationGuard> {
+        self.ensure_not_poisoned()?;
+        Ok(WriteCancellationGuard {
+            poisoned: Arc::clone(&self.write_poisoned),
+            armed: true,
+        })
+    }
+
+    fn ensure_not_poisoned(&self) -> io::Result<()> {
+        if self.write_poisoned.load(Ordering::Acquire) {
+            Err(other(
+                "archive builder cannot be reused after a cancelled append operation",
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -717,7 +781,7 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
 impl<W: Write + Unpin + Send> Drop for Builder<W> {
     fn drop(&mut self) {
         // TODO: proper async cancellation
-        if !self.finished {
+        if !self.finished && !self.write_poisoned.load(Ordering::Acquire) {
             if let Some(cancellation) = self.cancellation.take() {
                 cancellation.send(self.obj.take().unwrap()).ok();
             }

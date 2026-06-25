@@ -1583,3 +1583,99 @@ async fn pax_size_does_not_apply_to_extension_headers() {
         entries
     );
 }
+
+#[tokio::test]
+async fn cancelled_append_poisoned_builder_cannot_be_reused() {
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use tokio::sync::oneshot;
+
+    struct ChunkedPendingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        pending: bool,
+        dropped: Option<oneshot::Sender<()>>,
+    }
+
+    impl AsyncWrite for ChunkedPendingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.pending {
+                self.pending = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            self.pending = true;
+            let amount = 17.min(buf.len());
+            self.bytes.lock().unwrap().extend_from_slice(&buf[..amount]);
+            Poll::Ready(Ok(amount))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Drop for ChunkedPendingWriter {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                dropped.send(()).ok();
+            }
+        }
+    }
+
+    let mut header = Header::new_gnu();
+    t!(header.set_path("file"));
+    header.set_size(0);
+    header.set_cksum();
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (dropped_tx, dropped_rx) = oneshot::channel();
+    let mut builder = Builder::new(ChunkedPendingWriter {
+        bytes: Arc::clone(&bytes),
+        pending: false,
+        dropped: Some(dropped_tx),
+    });
+    let mut first = Box::pin(builder.append(&header, &[][..]));
+    let first_poll = poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx))).await;
+    assert!(first_poll.is_pending());
+    drop(first);
+    assert_eq!(bytes.lock().unwrap().len(), 17);
+
+    let finish = builder.finish().await.unwrap_err();
+    assert_eq!(
+        finish.to_string(),
+        "archive builder cannot be reused after a cancelled append operation"
+    );
+    assert_eq!(bytes.lock().unwrap().len(), 17);
+
+    let retry = builder.append(&header, &[][..]).await.unwrap_err();
+    assert_eq!(
+        retry.to_string(),
+        "archive builder cannot be reused after a cancelled append operation"
+    );
+    assert_eq!(bytes.lock().unwrap().len(), 17);
+
+    drop(builder);
+    t!(dropped_rx.await);
+    assert_eq!(bytes.lock().unwrap().len(), 17);
+
+    let healthy_bytes = Arc::new(Mutex::new(Vec::new()));
+    let (healthy_dropped_tx, healthy_dropped_rx) = oneshot::channel();
+    drop(Builder::new(ChunkedPendingWriter {
+        bytes: Arc::clone(&healthy_bytes),
+        pending: false,
+        dropped: Some(healthy_dropped_tx),
+    }));
+    t!(healthy_dropped_rx.await);
+    assert_eq!(healthy_bytes.lock().unwrap().len(), 1024);
+}
