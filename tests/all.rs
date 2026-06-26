@@ -2248,19 +2248,15 @@ async fn read_only_directory_containing_files() {
 #[cfg(target_os = "linux")]
 async fn tar_directory_containing_special_files() {
     use std::env;
-    use std::ffi::CString;
 
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
     let fifo = td.path().join("fifo");
 
-    unsafe {
-        let fifo_path = t!(CString::new(fifo.to_str().unwrap()));
-        let ret = libc::mknod(fifo_path.as_ptr(), libc::S_IFIFO | 0o644, 0);
-        if ret != 0 {
-            libc::perror(fifo_path.as_ptr());
-            panic!("Failed to create a FIFO file");
-        }
-    }
+    t!(rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        fifo.as_path(),
+        rustix::fs::Mode::from_raw_mode(0o644),
+    ));
 
     t!(env::set_current_dir(td.path()));
     let mut ar = Builder::new(Vec::new());
