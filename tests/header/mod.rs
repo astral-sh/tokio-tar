@@ -3,7 +3,6 @@
 use std::{
     fs::{self, File},
     io::Write,
-    mem,
     path::Path,
     thread, time,
 };
@@ -228,7 +227,8 @@ fn set_metadata_deterministic() {
 
 #[test]
 fn extended_numeric_format() {
-    let mut h: GnuHeader = unsafe { mem::zeroed() };
+    let mut header = Header::new_gnu();
+    let h: &mut GnuHeader = header.as_gnu_mut().unwrap();
     h.as_header_mut().set_size(42);
     assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 50, 0]);
     h.as_header_mut().set_size(8589934593);
