@@ -614,23 +614,15 @@ async fn unpack_old_style_bsd_dir() {
 #[tokio::test]
 async fn handling_incorrect_file_size() {
     let td = t!(TempBuilder::new().prefix("async-tar").tempdir());
-
-    let mut ar = Builder::new(Vec::new());
-
-    let path = td.path().join("tmpfile");
-    let mut file = t!(File::create(&path).await);
-    t!(file.write_all(b"").await);
-    t!(file.flush().await);
-    let mut file = t!(File::open(&path).await);
     let mut header = Header::new_old();
     t!(header.set_path("somepath"));
-    header.set_metadata(&t!(file.metadata().await));
     header.set_size(2048); // past the end of file null blocks
     header.set_cksum();
-    t!(ar.append(&header, &mut file).await);
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.extend_from_slice(&[0; 1024]);
 
     // Extracting
-    let rdr = Cursor::new(t!(ar.into_inner().await));
+    let rdr = Cursor::new(bytes);
     let mut ar = Archive::new(rdr);
     assert!(ar.unpack(td.path()).await.is_err());
 
@@ -2275,13 +2267,14 @@ async fn tar_directory_containing_special_files() {
 
 #[tokio::test]
 async fn header_size_overflow() {
-    // maximal file size doesn't overflow anything
-    let mut ar = Builder::new(Vec::new());
+    // A maximal file size is accepted by the header but overflows record
+    // alignment when the archive is read.
     let mut header = Header::new_gnu();
     header.set_size(u64::MAX);
     header.set_cksum();
-    t!(ar.append(&header, "x".as_bytes()).await);
-    let result = t!(ar.into_inner().await);
+    let mut result = header.as_bytes().to_vec();
+    result.extend_from_slice(b"x");
+    result.extend_from_slice(&[0; 511 + 1024]);
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let entry = e.next().await.unwrap();
@@ -2294,16 +2287,18 @@ async fn header_size_overflow() {
     );
 
     // back-to-back entries that would overflow also don't panic
-    let mut ar = Builder::new(Vec::new());
     let mut header = Header::new_gnu();
     header.set_size(1_000);
     header.set_cksum();
-    t!(ar.append(&header, &[0u8; 1_000][..]).await);
+    let mut result = header.as_bytes().to_vec();
+    result.extend_from_slice(&[0; 1_000]);
+    result.extend_from_slice(&[0; 24]);
     let mut header = Header::new_gnu();
     header.set_size(u64::MAX - 513);
     header.set_cksum();
-    t!(ar.append(&header, "x".as_bytes()).await);
-    let result = t!(ar.into_inner().await);
+    result.extend_from_slice(header.as_bytes());
+    result.extend_from_slice(b"x");
+    result.extend_from_slice(&[0; 511 + 1024]);
     let mut ar = Archive::new(&result[..]);
     let mut e = t!(ar.entries());
     let first = e.next().await.unwrap();
@@ -2316,6 +2311,78 @@ async fn header_size_overflow() {
         "bad error: {}",
         err
     );
+}
+
+#[tokio::test]
+async fn append_limits_body_to_declared_size() {
+    for (declared, actual) in [
+        (511, 511),
+        (511, 512),
+        (511, 513),
+        (512, 512),
+        (512, 513),
+        (513, 513),
+    ] {
+        let mut builder = Builder::new(Vec::new());
+
+        let mut header = Header::new_gnu();
+        t!(header.set_path("data"));
+        header.set_size(declared);
+        header.set_cksum();
+        t!(builder
+            .append(&header, vec![b'x'; actual as usize].as_slice())
+            .await);
+
+        let witness_data = b"witness";
+        let mut witness = Header::new_gnu();
+        t!(witness.set_path("witness"));
+        witness.set_size(witness_data.len() as u64);
+        witness.set_cksum();
+        t!(builder.append(&witness, witness_data.as_slice()).await);
+
+        let bytes = t!(builder.into_inner().await);
+        let mut archive = Archive::new(Cursor::new(bytes));
+        let mut entries = t!(archive.entries());
+
+        let mut data = t!(entries.next().await.unwrap());
+        assert_eq!(t!(data.path()).as_ref(), Path::new("data"));
+        let mut body = Vec::new();
+        t!(data.read_to_end(&mut body).await);
+        assert_eq!(body, vec![b'x'; declared as usize]);
+        drop(data);
+
+        let mut witness = t!(entries.next().await.unwrap());
+        assert_eq!(t!(witness.path()).as_ref(), Path::new("witness"));
+        let mut body = Vec::new();
+        t!(witness.read_to_end(&mut body).await);
+        assert_eq!(body, witness_data);
+        drop(witness);
+
+        assert!(entries.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn append_rejects_body_shorter_than_declared_size() {
+    for (declared, actual) in [(512, 511), (513, 511), (513, 512)] {
+        let mut builder = Builder::new(Vec::new());
+        let mut header = Header::new_gnu();
+        t!(header.set_path("data"));
+        header.set_size(declared);
+        header.set_cksum();
+
+        let error = builder
+            .append(&header, vec![b'x'; actual as usize].as_slice())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("expected {declared} bytes, got {actual}")),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[tokio::test]
