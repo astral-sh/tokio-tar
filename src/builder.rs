@@ -615,21 +615,24 @@ async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
         if data.len() < max {
             return Err(e);
         }
-        let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
-        // null-terminated string
-        let mut data2 = data.chain(io::repeat(0).take(1));
-        append(dst, &header2, &mut data2).await?;
-
         // Truncate the path to store in the header we're about to emit to
         // ensure we've got something at least mentioned. Note that we use
         // `str`-encoding to be compatible with Windows, but in general the
         // entry in the header itself shouldn't matter too much since extraction
         // doesn't look at it.
+        //
+        // Validate before writing the long-name extension so an error cannot
+        // leave an orphaned extension that renames the next archive entry.
         let truncated = match str::from_utf8(&data[..max]) {
             Ok(s) => s,
             Err(e) => str::from_utf8(&data[..e.valid_up_to()]).unwrap(),
         };
         header.set_truncated_path_for_gnu_header(truncated)?;
+
+        let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
+        // null-terminated string
+        let mut data2 = data.chain(io::repeat(0).take(1));
+        append(dst, &header2, &mut data2).await?;
     }
     Ok(())
 }

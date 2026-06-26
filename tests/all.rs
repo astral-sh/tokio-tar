@@ -288,6 +288,40 @@ async fn large_filename_with_dot_dot_at_100_byte_mark() {
 }
 
 #[tokio::test]
+async fn append_data_error_does_not_corrupt_subsequent_entries() {
+    let mut ar = Builder::new(Vec::new());
+
+    // This path is long enough to require a GNU long-name extension, but its
+    // truncated form is rejected because it contains a parent component.
+    let invalid_path = "a/../b/".to_string() + &"c".repeat(100);
+    let mut header = Header::new_gnu();
+    header.set_size(5);
+    header.set_cksum();
+    assert!(ar
+        .append_data(&mut header, invalid_path, &b"first"[..])
+        .await
+        .is_err());
+
+    let mut header = Header::new_gnu();
+    header.set_size(6);
+    header.set_cksum();
+    t!(ar
+        .append_data(&mut header, "clean.txt", &b"second"[..])
+        .await);
+
+    let data = t!(ar.into_inner().await);
+    let mut archive = Archive::new(Cursor::new(data));
+    let mut entries = t!(archive.entries());
+    let mut entry = t!(entries.next().await.unwrap());
+
+    assert_eq!(&*t!(entry.path_bytes()), b"clean.txt");
+    let mut contents = String::new();
+    t!(entry.read_to_string(&mut contents).await);
+    assert_eq!(contents, "second");
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn reading_entries() {
     let rdr = Cursor::new(tar!("reading_files.tar"));
     let mut ar = Archive::new(rdr);
