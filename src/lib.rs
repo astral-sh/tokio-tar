@@ -19,6 +19,7 @@
 
 #![deny(missing_docs)]
 #![deny(clippy::print_stderr, clippy::print_stdout)]
+#![deny(unsafe_code)]
 
 use std::io::Error;
 

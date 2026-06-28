@@ -29,6 +29,7 @@ portable-atomic = "1"
 rustc-hash = "2.1.0"
 tokio = { version = "1", features = ["fs", "io-util", "rt"] }
 tokio-stream = "0.1"
+zerocopy = { version = "0.8.52", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
