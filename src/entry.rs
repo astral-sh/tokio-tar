@@ -64,7 +64,7 @@ fn set_symlink_file_times(dst: &Path, mtime: SystemTime) -> io::Result<()> {
         .as_secs()
         .try_into()
         .map_err(|_| Error::new(ErrorKind::InvalidData, "mtime exceeds platform limits"))?;
-    let nanoseconds = duration.subsec_nanos().into();
+    let nanoseconds = duration.subsec_nanos() as _;
     let timestamps = Timestamps {
         last_access: Timespec {
             tv_sec: seconds,
