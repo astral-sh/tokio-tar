@@ -131,7 +131,7 @@ async fn reading_files() {
 
     let mut b = t!(entries.next().await.unwrap());
     assert_eq!(&*b.header().path_bytes(), b"b");
-    s.truncate(0);
+    s.clear();
     t!(b.read_to_string(&mut s).await);
     assert_eq!(s, "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\n");
 
@@ -297,13 +297,13 @@ async fn reading_entries() {
     let mut s = String::new();
     t!(a.read_to_string(&mut s).await);
     assert_eq!(s, "a\na\na\na\na\na\na\na\na\na\na\n");
-    s.truncate(0);
+    s.clear();
     t!(a.read_to_string(&mut s).await);
     assert_eq!(s, "");
     let mut b = t!(entries.next().await.unwrap());
 
     assert_eq!(&*b.header().path_bytes(), b"b");
-    s.truncate(0);
+    s.clear();
     t!(b.read_to_string(&mut s).await);
     assert_eq!(s, "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\n");
     assert!(entries.next().await.is_none());
@@ -1924,14 +1924,14 @@ async fn extract_sparse() {
     assert_eq!(&s[..5], "test\n");
     assert!(s[5..].chars().all(|x| x == '\u{0}'));
 
-    s.truncate(0);
+    s.clear();
     t!(t!(File::open(td.path().join("sparse_end.txt")).await)
         .read_to_string(&mut s)
         .await);
     assert!(s[..s.len() - 9].chars().all(|x| x == '\u{0}'));
     assert_eq!(&s[s.len() - 9..], "test_end\n");
 
-    s.truncate(0);
+    s.clear();
     t!(t!(File::open(td.path().join("sparse_ext.txt")).await)
         .read_to_string(&mut s)
         .await);
@@ -1948,7 +1948,7 @@ async fn extract_sparse() {
     assert!(s[0x9000 + 5..0xb000].chars().all(|x| x == '\u{0}'));
     assert_eq!(&s[0xb000..0xb000 + 5], "text\n");
 
-    s.truncate(0);
+    s.clear();
     t!(t!(File::open(td.path().join("sparse.txt")).await)
         .read_to_string(&mut s)
         .await);
