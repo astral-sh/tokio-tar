@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 PACKAGE_NAME = "astral-tokio-tar"
-ROOT = Path.cwd()
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def run(*args: str, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
