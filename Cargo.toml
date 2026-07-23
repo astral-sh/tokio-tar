@@ -15,6 +15,7 @@ keywords = ["tar", "tarfile", "encoding"]
 readme = "README.md"
 edition = "2021"
 rust-version = "1.83.0"
+exclude = ["/scripts/"]
 
 description = """
 A Rust implementation of an async TAR file reader and writer. This library does not
