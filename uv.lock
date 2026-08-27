@@ -1,0 +1,37 @@
+version = 1
+revision = 3
+requires-python = ">=3.14"
+
+[manifest]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "astral-dev-toolchain-cargo-hack", specifier = ">=0.6.45" },
+    { name = "astral-dev-toolchain-cargo-shear", specifier = ">=1.13.4" },
+]
+
+[[package]]
+name = "astral-dev-toolchain-cargo-hack"
+version = "0.6.45"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/30/f26a4ff466ee01ba5b5b5ee88d7367d5040a68f8a2e26ac846989357a01b/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:94a1bf5f94896a0b22d547b5905790b4ec285b2c65a9cfd1f398b11f4ee9b284", size = 890107, upload-time = "2026-08-26T13:54:21.024Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/90/35f082dd32a2f2df968fe2673e41223b22c47e2617ee816c8eb9cf31fe10/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c2fefbf802b847e70b681ac3404e80415675d126947530733021899200e58430", size = 829593, upload-time = "2026-08-26T13:54:22.379Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/3a/8568f4edec3231a6ac4df714dfba8dc857570ef7619337cdb685d3cdad52/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2a5655290b4a0443fa81f8d8270d8028c4380315ba4cafc146d57470b9d3d415", size = 814948, upload-time = "2026-08-26T13:54:24.179Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/dd/4fcdea44c3c88c4b12ec957600badc7cc759c4aa2fea8341624474f3ff89/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f48ca4698cef7c02a6f845253c4236b9974336e37c9e69ec9135d795696444d3", size = 872966, upload-time = "2026-08-26T13:54:25.554Z" },
+    { url = "https://files.pythonhosted.org/packages/74/cc/ca1d18499fe5ee95495cc5ce539f5a3f6bdf0016618cfc90c6940e0a6b53/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-win_amd64.whl", hash = "sha256:65154901e0be3bfddd7fdd3cfe7e0abc2700347b4c5ba83e35ba06fcc71d289f", size = 834412, upload-time = "2026-08-26T13:54:26.989Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/2c/b378a0fba309ae7fbc9a55eaaf28f958dee5ece3737437816d3a1b136ce1/astral_dev_toolchain_cargo_hack-0.6.45-py3-none-win_arm64.whl", hash = "sha256:07135ae2405d2af2be6e99af51096e6fa236ebe190f360d229a901651f430d21", size = 773529, upload-time = "2026-08-26T13:54:28.273Z" },
+]
+
+[[package]]
+name = "astral-dev-toolchain-cargo-shear"
+version = "1.13.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/7d/6f44e9e1d0e29b9cd2903eeee8e9cc7612241cd195c7628841f3f9034409/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:2142f359d3aa21a1e996ca6f89683f5b990fa568ec24e60036761c225300c35d", size = 1480556, upload-time = "2026-08-25T21:13:01.403Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/da/cbf7407c2c9391a986ebd8a05fe2c4aa72c0228723650062928e68f376e9/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:359e17bbfb1b388633dc87277dd6ed13f99d987923c40a574377e44b7449b3d7", size = 1342579, upload-time = "2026-08-25T21:13:02.992Z" },
+    { url = "https://files.pythonhosted.org/packages/63/7d/1b7e465833026658ffad9f7a504b5f2d6e2b0977000f06faa14192acce3d/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:97e9e5ca2854a3b12e511e4f30f47c49fa36aafae79c65c2badf14c4caf47998", size = 1466122, upload-time = "2026-08-25T21:13:04.441Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/4f/bc9865a14140f5a990f9bbb7ff5b36e2e0f9151d819570fedb516c26fdd6/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bb239c6e9f4abe609b02dbf2933113378bdce845bcaa5ee0000bc7d04750a5ad", size = 1572315, upload-time = "2026-08-25T21:13:05.851Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/f5/db879c8c71810df57b290af915fd4e4cd588d4b8161267d593d45100d7a1/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-win_amd64.whl", hash = "sha256:b682608009b22130ff3b99ab782ce7ee3555711989c2a84ed627be1a016643d6", size = 1476915, upload-time = "2026-08-25T21:13:07.366Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/7e/62dc9d09eec545a555030fbe8fdb117006ad5684ebe8da4dad8c81a6a251/astral_dev_toolchain_cargo_shear-1.13.4-py3-none-win_arm64.whl", hash = "sha256:91874654b0dcb2b0333a615f81e3cde3f9c10d3148b180254764fce606930af0", size = 1370034, upload-time = "2026-08-25T21:13:08.764Z" },
+]
