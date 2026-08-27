@@ -2,6 +2,10 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = []
+#
+# [tool.uv]
+# exclude-newer = "P7D"
+# no-build = true
 # ///
 """Update the crate version and lockfile for a release."""
 
