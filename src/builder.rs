@@ -527,22 +527,21 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     use ::std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     let file_type = stat.file_type();
-    let entry_type;
-    if file_type.is_socket() {
+    let entry_type = if file_type.is_socket() {
         // sockets can't be archived
         return Err(other(&format!(
             "{}: socket can not be archived",
             path.display()
         )));
     } else if file_type.is_fifo() {
-        entry_type = EntryType::Fifo;
+        EntryType::Fifo
     } else if file_type.is_char_device() {
-        entry_type = EntryType::Char;
+        EntryType::Char
     } else if file_type.is_block_device() {
-        entry_type = EntryType::Block;
+        EntryType::Block
     } else {
         return Err(other(&format!("{} has unknown file type", path.display())));
-    }
+    };
 
     let mut header = Header::new_gnu();
     header.set_metadata_in_mode(stat, mode);
