@@ -236,6 +236,11 @@ impl<R: Read + Unpin> Archive<R> {
     /// sequence. If entries are processed out of sequence (from what the
     /// stream returns), then the contents read for each entry may be
     /// corrupted.
+    ///
+    /// **IMPORTANT**: Most users want [`Self::entries`], not this API.
+    /// This API returns every *physical* entry in the archive, rather
+    /// than their composed "logical" entries. It should only be used
+    /// for low-level diagnostic parsing.
     pub fn entries_raw(&mut self) -> io::Result<RawEntries<R>> {
         if self.inner.pax_only {
             return Err(other("raw entries are not supported by pax-only mode"));
@@ -721,7 +726,7 @@ fn poll_next_raw<R: Read + Unpin>(
     let mut header = current_header.take().unwrap();
 
     // note when pax extensions are available, the size from the header will be ignored
-    let mut size = header.entry_size()?;
+    let mut size = header.raw_entry_size()?;
     let mut pax_username = None;
     let mut pax_groupname = None;
 

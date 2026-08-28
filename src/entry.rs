@@ -344,9 +344,9 @@ impl<R: Read + Unpin> Entry<R> {
 
     /// Returns the total size of this entry's data in bytes.
     ///
-    /// Unlike [`Header::size`], this includes any `size` override from PAX
+    /// Unlike [`Header::raw_entry_size`], this includes any `size` override from PAX
     /// extensions describing this entry.
-    pub fn size(&self) -> u64 {
+    pub fn effective_size(&self) -> u64 {
         self.fields.size
     }
 

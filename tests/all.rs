@@ -194,7 +194,7 @@ async fn writing_files() {
     let mut f = t!(entries.next().await.unwrap());
 
     assert_eq!(&*f.header().path_bytes(), b"test2");
-    assert_eq!(f.header().size().unwrap(), 4);
+    assert_eq!(f.header().raw_file_size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
@@ -231,7 +231,7 @@ async fn large_filename() {
     // The short entry added with `append`
     let mut f = entries.next().await.unwrap().unwrap();
     assert_eq!(&*f.header().path_bytes(), filename.as_bytes());
-    assert_eq!(f.header().size().unwrap(), 4);
+    assert_eq!(f.header().raw_file_size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
@@ -239,7 +239,7 @@ async fn large_filename() {
     // The long entry added with `append_file`
     let mut f = entries.next().await.unwrap().unwrap();
     assert_eq!(&*t!(f.path_bytes()), too_long.as_bytes());
-    assert_eq!(f.header().size().unwrap(), 4);
+    assert_eq!(f.header().raw_file_size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
@@ -248,7 +248,7 @@ async fn large_filename() {
     let mut f = entries.next().await.unwrap().unwrap();
     assert!(f.header().path_bytes().len() < too_long.len());
     assert_eq!(&*t!(f.path_bytes()), too_long.as_bytes());
-    assert_eq!(f.header().size().unwrap(), 4);
+    assert_eq!(f.header().raw_file_size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
@@ -280,7 +280,7 @@ async fn large_filename_with_dot_dot_at_100_byte_mark() {
 
     let mut f = t!(entries.next().await.unwrap());
     assert_eq!(&*t!(f.path_bytes()), long_name_with_dot_dot.as_bytes());
-    assert_eq!(f.header().size().unwrap(), 4);
+    assert_eq!(f.header().raw_file_size().unwrap(), 4);
     let mut s = String::new();
     t!(f.read_to_string(&mut s).await);
     assert_eq!(s, "test");
@@ -784,7 +784,7 @@ async fn octal_spaces() {
     assert_eq!(entry.header().mode().unwrap() & 0o777, 0o777);
     assert_eq!(entry.header().uid().unwrap(), 0);
     assert_eq!(entry.header().gid().unwrap(), 0);
-    assert_eq!(entry.header().size().unwrap(), 2);
+    assert_eq!(entry.header().raw_file_size().unwrap(), 2);
     assert_eq!(entry.header().mtime().unwrap(), 0o12_440_016_664);
     assert_eq!(entry.header().cksum().unwrap(), 0o4253);
 }
@@ -1325,28 +1325,28 @@ async fn pax_size_overrides_header() {
 
     let first = t!(entries.next().await.unwrap());
     assert!(t!(first.path()).ends_with("normal.txt"));
-    assert_eq!(first.size(), 6);
-    assert_eq!(first.size(), t!(first.header().size()));
+    assert_eq!(first.effective_size(), 6);
+    assert_eq!(first.effective_size(), t!(first.header().raw_file_size()));
 
     let mut second = t!(entries.next().await.unwrap());
     assert!(t!(second.path()).ends_with("blob.bin"));
-    assert_eq!(second.size(), 1024);
-    assert_eq!(t!(second.header().size()), 0);
+    assert_eq!(second.effective_size(), 1024);
+    assert_eq!(t!(second.header().raw_file_size()), 0);
 
     let mut byte = [0];
     t!(second.read_exact(&mut byte).await);
-    assert_eq!(second.size(), 1024);
+    assert_eq!(second.effective_size(), 1024);
 
     let mut contents = Vec::new();
     t!(second.read_to_end(&mut contents).await);
     assert_eq!(contents.len(), 1023);
-    assert_eq!(second.size(), 1024);
-    assert_eq!(t!(second.header().size()), 0);
+    assert_eq!(second.effective_size(), 1024);
+    assert_eq!(t!(second.header().raw_file_size()), 0);
 
     let third = t!(entries.next().await.unwrap());
     assert!(t!(third.path()).ends_with("marker.txt"));
-    assert_eq!(third.size(), 7);
-    assert_eq!(third.size(), t!(third.header().size()));
+    assert_eq!(third.effective_size(), 7);
+    assert_eq!(third.effective_size(), t!(third.header().raw_file_size()));
     assert!(entries.next().await.is_none());
 }
 
@@ -1371,8 +1371,8 @@ async fn last_pax_size_wins() {
     let mut entries = t!(archive.entries());
 
     let mut file = t!(entries.next().await.unwrap());
-    assert_eq!(file.size(), 4);
-    assert_eq!(t!(file.header().size()), 1);
+    assert_eq!(file.effective_size(), 4);
+    assert_eq!(t!(file.header().raw_file_size()), 1);
 
     let mut contents = Vec::new();
     t!(file.read_to_end(&mut contents).await);
@@ -1406,7 +1406,7 @@ async fn pax_numeric_overrides_accept_decimal_digits() {
     let mut entries = t!(archive.entries());
 
     let entry = t!(entries.next().await.unwrap());
-    assert_eq!(t!(entry.header().size()), 2);
+    assert_eq!(t!(entry.header().raw_file_size()), 2);
     assert_eq!(t!(entry.header().uid()), 42);
     assert_eq!(t!(entry.header().gid()), 43);
     assert!(entries.next().await.is_none());
@@ -1990,7 +1990,7 @@ async fn large_sparse() {
     let a = t!(entries.next().await.unwrap());
     let h = a.header().as_gnu().unwrap();
     assert_eq!(h.real_size().unwrap(), 12626929280);
-    assert_eq!(a.size(), 12626929280);
+    assert_eq!(a.effective_size(), 12626929280);
 }
 
 #[tokio::test]
@@ -1999,11 +1999,11 @@ async fn sparse_with_trailing() {
     let mut ar = Archive::new(rdr);
     let mut entries = t!(ar.entries());
     let mut a = t!(entries.next().await.unwrap());
-    assert_eq!(a.size(), 0x100_00c);
+    assert_eq!(a.effective_size(), 0x100_00c);
     let mut s = String::new();
     t!(a.read_to_string(&mut s).await);
     assert_eq!(0x100_00c, s.len());
-    assert_eq!(a.size(), s.len() as u64);
+    assert_eq!(a.effective_size(), s.len() as u64);
     assert_eq!(&s[..0xc], "0MB through\n");
     assert!(s[0xc..0x100_000].chars().all(|x| x == '\u{0}'));
     assert_eq!(&s[0x100_000..], "1MB through\n");
@@ -2104,7 +2104,7 @@ async fn append_path_symlink() {
         t!(entry.link_name()),
         Some(Cow::from(Path::new("testdest")))
     );
-    assert_eq!(t!(entry.header().size()), 0);
+    assert_eq!(t!(entry.header().raw_file_size()), 0);
 
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), Path::new("test2"));
@@ -2112,7 +2112,7 @@ async fn append_path_symlink() {
         t!(entry.link_name()),
         Some(Cow::from(Path::new(&long_linkname)))
     );
-    assert_eq!(t!(entry.header().size()), 0);
+    assert_eq!(t!(entry.header().raw_file_size()), 0);
 
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(t!(entry.path()), Path::new(&long_pathname));
@@ -2120,7 +2120,7 @@ async fn append_path_symlink() {
         t!(entry.link_name()),
         Some(Cow::from(Path::new(&long_linkname)))
     );
-    assert_eq!(t!(entry.header().size()), 0);
+    assert_eq!(t!(entry.header().raw_file_size()), 0);
 
     assert!(entries.next().await.is_none());
 }
