@@ -761,7 +761,6 @@ fn poll_next_raw<R: Read + Unpin>(
                         .value()
                         .map_err(|_e| other("failed to parse pax size as string"))?;
                     size = parse_pax_decimal(size_str, "failed to parse pax size")?;
-                    header.set_size(size);
                 }
 
                 "uid" => {
