@@ -18,8 +18,8 @@ fn main() {
             println!("-------------------------- Entry {}", i);
             let mut f = file.unwrap();
             println!("path: {}", f.path().unwrap().display());
-            println!("size: {}", f.header().size().unwrap());
-            println!("entry size: {}", f.header().entry_size().unwrap());
+            println!("raw size: {}", f.header().raw_file_size().unwrap());
+            println!("raw entry size: {}", f.header().raw_entry_size().unwrap());
             println!("link name: {:?}", f.link_name().unwrap());
             println!("file type: {:#x}", f.header().entry_type().as_byte());
             println!("mode: {:#o}", f.header().mode().unwrap());

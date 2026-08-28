@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+* Remove all unsafe code from the crate
+* New API: `Entry::effective_size` returns the effective size of an archive entry,
+  including any pax `size` records that apply to it
+* Changed: `Header::entry_size` is now `Header::raw_entry_size`
+* Changed: `Header::size` is now `Header::raw_file_size`
+
 ## 0.5.6
 
 * Fixed a parser desynchronization vulnerability when reading tar archives that

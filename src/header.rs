@@ -315,13 +315,17 @@ impl Header {
 
     /// Returns the size of entry's data this header represents.
     ///
-    /// This is different from `Header::size` for sparse files, which have
-    /// some longer `size()` but shorter `entry_size()`. The `entry_size()`
-    /// listed here should be the number of bytes in the archive this header
-    /// describes.
+    /// This is different from [`Header::raw_size`] for sparse files, which have
+    /// some longer [`Header::raw_size`] but shorter [`Header::raw_entry_size`].
+    /// The [`Header::raw_entry_size`] listed here should be the number of bytes in the
+    /// archive this header describes.
     ///
     /// May return an error if the field is corrupted.
-    pub fn entry_size(&self) -> io::Result<u64> {
+    ///
+    /// **IMPORTANT**: This does not account for PAX `size` overrides.
+    /// Use [`Entry::effective_size`](crate::Entry::effective_size) to obtain
+    /// the effective size of an archive entry.
+    pub fn raw_entry_size(&self) -> io::Result<u64> {
         num_field_wrapper_from(&self.as_old().size).map_err(|err| {
             io::Error::new(
                 err.kind(),
@@ -330,16 +334,21 @@ impl Header {
         })
     }
 
-    /// Returns the file size this header represents.
+    /// Returns the file size this header represents, adjusted for any "real size"
+    /// if the header is a GNU sparse header.
     ///
     /// May return an error if the field is corrupted.
-    pub fn size(&self) -> io::Result<u64> {
+    ///
+    /// **IMPORTANT**: This does not account for PAX `size` overrides. Use
+    /// [`Entry::effective_size`](crate::Entry::effective_size) to obtain the effective size of an
+    /// archive entry.
+    pub fn raw_file_size(&self) -> io::Result<u64> {
         if self.entry_type().is_gnu_sparse() {
             self.as_gnu()
                 .ok_or_else(|| other("sparse header was not a gnu header"))
                 .and_then(|h| h.real_size())
         } else {
-            self.entry_size()
+            self.raw_entry_size()
         }
     }
 
@@ -871,10 +880,10 @@ impl Header {
     }
 
     fn debug_fields(&self, b: &mut fmt::DebugStruct) {
-        if let Ok(entry_size) = self.entry_size() {
+        if let Ok(entry_size) = self.raw_entry_size() {
             b.field("entry_size", &entry_size);
         }
-        if let Ok(size) = self.size() {
+        if let Ok(size) = self.raw_file_size() {
             b.field("size", &size);
         }
         if let Ok(path) = self.path() {

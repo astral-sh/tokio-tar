@@ -213,7 +213,7 @@ fn set_metadata_deterministic() {
     let two = mk_header(tmppath.as_path(), true);
 
     // Always expected to match.
-    assert_eq!(t!(one.size()), t!(two.size()));
+    assert_eq!(t!(one.raw_file_size()), t!(two.raw_file_size()));
     assert_eq!(t!(one.path()), t!(two.path()));
     assert_eq!(t!(one.mode()), t!(two.mode()));
 
@@ -236,9 +236,9 @@ fn extended_numeric_format() {
     h.as_header_mut().set_size(44);
     assert_eq!(h.size, [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 52, 0]);
     h.size = [0x80, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0];
-    assert_eq!(h.as_header().entry_size().unwrap(), 0x0200000000);
+    assert_eq!(h.as_header().raw_entry_size().unwrap(), 0x0200000000);
     h.size = [48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 51, 0];
-    assert_eq!(h.as_header().entry_size().unwrap(), 43);
+    assert_eq!(h.as_header().raw_entry_size().unwrap(), 43);
 
     h.as_header_mut().set_gid(42);
     assert_eq!(h.gid, [48, 48, 48, 48, 48, 53, 50, 0]);
