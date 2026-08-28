@@ -333,6 +333,10 @@ impl Header {
     /// Returns the file size this header represents.
     ///
     /// May return an error if the field is corrupted.
+    ///
+    /// This does not account for PAX `size` overrides. Use
+    /// [`Entry::size`](crate::Entry::size) to obtain the effective size of an
+    /// archive entry.
     pub fn size(&self) -> io::Result<u64> {
         if self.entry_type().is_gnu_sparse() {
             self.as_gnu()

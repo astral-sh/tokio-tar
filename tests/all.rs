@@ -1318,6 +1318,68 @@ async fn pax_precedence() {
     assert!(entries.next().await.is_none());
 }
 
+#[tokio::test]
+async fn pax_size_overrides_header() {
+    let mut ar = Archive::new(tar!("pax-header-precedence.tar"));
+    let mut entries = t!(ar.entries());
+
+    let first = t!(entries.next().await.unwrap());
+    assert!(t!(first.path()).ends_with("normal.txt"));
+    assert_eq!(first.size(), 6);
+    assert_eq!(first.size(), t!(first.header().size()));
+
+    let mut second = t!(entries.next().await.unwrap());
+    assert!(t!(second.path()).ends_with("blob.bin"));
+    assert_eq!(second.size(), 1024);
+    assert_eq!(t!(second.header().size()), 0);
+
+    let mut byte = [0];
+    t!(second.read_exact(&mut byte).await);
+    assert_eq!(second.size(), 1024);
+
+    let mut contents = Vec::new();
+    t!(second.read_to_end(&mut contents).await);
+    assert_eq!(contents.len(), 1023);
+    assert_eq!(second.size(), 1024);
+    assert_eq!(t!(second.header().size()), 0);
+
+    let third = t!(entries.next().await.unwrap());
+    assert!(t!(third.path()).ends_with("marker.txt"));
+    assert_eq!(third.size(), 7);
+    assert_eq!(third.size(), t!(third.header().size()));
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn last_pax_size_wins() {
+    let mut sizes = pax_record("size", b"3");
+    sizes.extend(pax_record("size", b"4"));
+
+    let mut builder = Builder::new(Vec::new());
+    let mut extension = Header::new_ustar();
+    extension.set_size(sizes.len() as u64);
+    extension.set_entry_type(EntryType::new(b'x'));
+    t!(builder.append_data(&mut extension, "pax", &sizes[..]).await);
+
+    // PAX determines the payload size; keep the raw header size different.
+    let mut file = Header::new_ustar();
+    file.set_size(1);
+    t!(builder.append_data(&mut file, "file", &b"DATA"[..]).await);
+
+    let bytes = t!(builder.into_inner().await);
+    let mut archive = Archive::new(&bytes[..]);
+    let mut entries = t!(archive.entries());
+
+    let mut file = t!(entries.next().await.unwrap());
+    assert_eq!(file.size(), 4);
+    assert_eq!(t!(file.header().size()), 1);
+
+    let mut contents = Vec::new();
+    t!(file.read_to_end(&mut contents).await);
+    assert_eq!(contents, b"DATA");
+    assert!(entries.next().await.is_none());
+}
+
 async fn pax_numeric_override_archive(pax: &[u8]) -> Vec<u8> {
     let mut builder = Builder::new(Vec::new());
 
@@ -1928,6 +1990,7 @@ async fn large_sparse() {
     let a = t!(entries.next().await.unwrap());
     let h = a.header().as_gnu().unwrap();
     assert_eq!(h.real_size().unwrap(), 12626929280);
+    assert_eq!(a.size(), 12626929280);
 }
 
 #[tokio::test]
@@ -1936,9 +1999,11 @@ async fn sparse_with_trailing() {
     let mut ar = Archive::new(rdr);
     let mut entries = t!(ar.entries());
     let mut a = t!(entries.next().await.unwrap());
+    assert_eq!(a.size(), 0x100_00c);
     let mut s = String::new();
     t!(a.read_to_string(&mut s).await);
     assert_eq!(0x100_00c, s.len());
+    assert_eq!(a.size(), s.len() as u64);
     assert_eq!(&s[..0xc], "0MB through\n");
     assert!(s[0xc..0x100_000].chars().all(|x| x == '\u{0}'));
     assert_eq!(&s[0x100_000..], "1MB through\n");

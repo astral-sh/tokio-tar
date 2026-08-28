@@ -342,6 +342,14 @@ impl<R: Read + Unpin> Entry<R> {
         &self.fields.header
     }
 
+    /// Returns the total size of this entry's data in bytes.
+    ///
+    /// Unlike [`Header::size`], this includes any `size` override from PAX
+    /// extensions describing this entry.
+    pub fn size(&self) -> u64 {
+        self.fields.size
+    }
+
     /// Returns the starting position, in bytes, of the header of this entry in
     /// the archive.
     ///
