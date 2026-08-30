@@ -2200,6 +2200,25 @@ fn sparse_with_two_continuation_blocks() -> Vec<u8> {
     bytes
 }
 
+fn sparse_with_empty_continuation_tail(empty_blocks: usize) -> Vec<u8> {
+    assert!(empty_blocks > 0);
+    let mut bytes = tar!("sparse.tar").to_vec();
+    bytes[SPARSE_EXT_HEADER_OFFSET + 504] = 1;
+
+    let mut tail = Vec::with_capacity(empty_blocks * 512);
+    for index in 0..empty_blocks {
+        let mut continuation = [0_u8; 512];
+        if index + 1 < empty_blocks {
+            continuation[504] = 1;
+        }
+        tail.extend_from_slice(&continuation);
+    }
+
+    let insert_at = SPARSE_EXT_HEADER_OFFSET + 512;
+    bytes.splice(insert_at..insert_at, tail);
+    bytes
+}
+
 #[tokio::test]
 async fn sparse_entry_limit_accepts_exact_continuation_boundary() {
     let bytes = sparse_with_two_continuation_blocks();
@@ -2228,6 +2247,82 @@ async fn sparse_entry_limit_counts_across_continuation_blocks() {
     let err = entries.next().await.unwrap().unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     assert_eq!(err.to_string(), "archive sparse entry limit exceeded");
+}
+
+#[tokio::test]
+async fn sparse_continuation_block_limit_accepts_exact_empty_chain() {
+    let bytes = sparse_with_empty_continuation_tail(2);
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(3)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(entry.raw_file_position(), 4096);
+}
+
+#[tokio::test]
+async fn sparse_continuation_block_limit_counts_empty_blocks() {
+    let bytes = sparse_with_empty_continuation_tail(2);
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(2)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        err.to_string(),
+        "archive sparse continuation block limit exceeded"
+    );
+}
+
+fn sparse_with_missing_second_continuation() -> Vec<u8> {
+    let end = SPARSE_EXT_HEADER_OFFSET + 512;
+    let mut bytes = tar!("sparse.tar")[..end].to_vec();
+    bytes[SPARSE_EXT_HEADER_OFFSET + 504] = 1;
+    bytes
+}
+
+#[tokio::test]
+async fn sparse_continuation_truncation_wins_within_limit() {
+    let bytes = sparse_with_missing_second_continuation();
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(2)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "failed to read extension");
+}
+
+#[tokio::test]
+async fn sparse_continuation_limit_precedes_out_of_budget_read() {
+    let bytes = sparse_with_missing_second_continuation();
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(1)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        err.to_string(),
+        "archive sparse continuation block limit exceeded"
+    );
 }
 
 #[tokio::test]

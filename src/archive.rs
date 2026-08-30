@@ -54,6 +54,7 @@ pub struct ArchiveInner<R> {
     max_total_extension_size: Option<u64>,
     max_physical_entries: Option<u64>,
     max_sparse_entries: Option<u64>,
+    max_sparse_continuation_blocks: Option<u64>,
     obj: Mutex<R>,
 }
 
@@ -125,6 +126,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     max_total_extension_size: Option<u64>,
     max_physical_entries: Option<u64>,
     max_sparse_entries: Option<u64>,
+    max_sparse_continuation_blocks: Option<u64>,
 }
 
 impl<R: Read + Unpin> ArchiveBuilder<R> {
@@ -142,6 +144,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             max_total_extension_size: None,
             max_physical_entries: None,
             max_sparse_entries: None,
+            max_sparse_continuation_blocks: None,
             obj,
         }
     }
@@ -253,6 +256,17 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Limit the number of continuation blocks in each GNU sparse entry.
+    ///
+    /// Every 512-byte sparse continuation block counts, including blocks with
+    /// no map entries. The limit is checked before each block is read. A value
+    /// of zero rejects every GNU sparse entry that declares a continuation
+    /// block. Sparse continuation block count is unlimited by default.
+    pub fn set_max_sparse_continuation_blocks(mut self, max: u64) -> Self {
+        self.max_sparse_continuation_blocks = Some(max);
+        self
+    }
+
     /// Indicate whether to deny symlinks that point outside the destination
     /// directory when unpacking this entry. (Writing to locations outside the
     /// destination directory is _always_ forbidden.)
@@ -277,6 +291,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             max_total_extension_size,
             max_physical_entries,
             max_sparse_entries,
+            max_sparse_continuation_blocks,
             obj,
         } = self;
 
@@ -293,6 +308,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 max_total_extension_size,
                 max_physical_entries,
                 max_sparse_entries,
+                max_sparse_continuation_blocks,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
                 physical_entries: 0.into(),
@@ -318,6 +334,7 @@ impl<R: Read + Unpin> Archive<R> {
                 max_total_extension_size: None,
                 max_physical_entries: None,
                 max_sparse_entries: None,
+                max_sparse_continuation_blocks: None,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
                 physical_entries: 0.into(),
@@ -1097,6 +1114,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
     let mut cur = 0;
     let mut remaining = entry.size;
     let mut sparse_entries = 0_u64;
+    let mut continuation_blocks = 0_u64;
     {
         let data = &mut entry.data;
         let reader = archive.clone();
@@ -1170,6 +1188,22 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
 
             let ext = current_ext.as_mut().unwrap();
             while ext.is_extended() {
+                if let Some(limit) = archive.inner.max_sparse_continuation_blocks {
+                    let next = continuation_blocks.checked_add(1).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "archive sparse continuation block limit exceeded",
+                        )
+                    })?;
+                    if next > limit {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "archive sparse continuation block limit exceeded",
+                        )));
+                    }
+                    continuation_blocks = next;
+                }
+
                 match futures_core::ready!(poll_try_read_all(
                     &mut archive,
                     cx,
