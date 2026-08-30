@@ -1220,6 +1220,70 @@ async fn extension_entry_size_limit_precedes_payload_allocation() {
 }
 
 #[tokio::test]
+async fn extension_limit_error_fuses_logical_and_raw_streams() {
+    let mut smuggled = Header::new_ustar();
+    t!(smuggled.set_path("smuggled"));
+    smuggled.set_size(0);
+    smuggled.set_cksum();
+    let bytes = archive_with_extension(EntryType::XHeader, smuggled.as_bytes()).await;
+
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes.clone()))
+        .set_max_extension_entry_size(511)
+        .build();
+    let mut entries = t!(archive.entries());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive extension entry size limit exceeded"
+    );
+    assert!(entries.next().await.is_none());
+
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_extension_entry_size(511)
+        .build();
+    let mut entries = t!(archive.entries_raw());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive extension entry size limit exceeded"
+    );
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn dangling_extension_error_fuses_logical_stream() {
+    let mut bytes = archive_with_extension(EntryType::XHeader, b"9 path=a\n").await;
+    bytes.truncate(1024);
+    let mut archive = Archive::new(Cursor::new(bytes));
+    let mut entries = t!(archive.entries());
+
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "extension entry was not followed by a member"
+    );
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn semantic_extension_error_fuses_logical_stream() {
+    let mut builder = Builder::new(Vec::new());
+    let mut extension = Header::new_ustar();
+    t!(extension.set_path("extension"));
+    extension.set_entry_type(EntryType::XHeader);
+    extension.set_size(b"malformed\n".len() as u64);
+    extension.set_cksum();
+    t!(builder.append(&extension, b"malformed\n".as_slice()).await);
+    t!(builder.append(&regular_ustar_header(), io::empty()).await);
+    let mut archive = Archive::new(Cursor::new(t!(builder.into_inner().await)));
+    let mut entries = t!(archive.entries());
+
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("malformed pax extension"));
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
 async fn extension_entry_size_limit_accepts_exact_boundary() {
     for (entry_type, payload) in [
         (EntryType::GNULongName, b"long-name\0".as_slice()),
@@ -2403,6 +2467,30 @@ async fn sparse_entry_limit_accepts_exact_continuation_boundary() {
     let entry = t!(entries.next().await.unwrap());
     assert_eq!(&*entry.header().path_bytes(), b"sparse_ext.txt");
     assert_eq!(entry.raw_file_position(), 3584);
+}
+
+#[tokio::test]
+async fn zero_sparse_limits_reject_logical_sparse_entries() {
+    let mut archive = ArchiveBuilder::new(Cursor::new(tar!("sparse.tar")))
+        .set_max_sparse_entries(0)
+        .build();
+    let mut entries = t!(archive.entries());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "archive sparse entry limit exceeded");
+    assert!(entries.next().await.is_none());
+
+    let mut archive = ArchiveBuilder::new(Cursor::new(tar!("sparse.tar")))
+        .set_max_sparse_continuation_blocks(0)
+        .build();
+    let mut entries = t!(archive.entries());
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive sparse continuation block limit exceeded"
+    );
+    assert!(entries.next().await.is_none());
 }
 
 #[tokio::test]

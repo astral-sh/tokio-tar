@@ -412,6 +412,7 @@ impl<R: Read + Unpin> Archive<R> {
 
         Ok(RawEntries {
             archive: self.clone(),
+            failed: false,
             current: (0, None, 0),
         })
     }
@@ -513,7 +514,7 @@ pub struct Entries<R: Read + Unpin> {
     pending: Option<Entry<Archive<R>>>,
     /// Persistent parser state for a GNU sparse entry.
     sparse: Option<SparseState<R>>,
-    /// Whether a sparse parser error made the stream unsafe to resume.
+    /// Whether the raw or sparse parser advanced state before returning an error.
     failed: bool,
     /// GNU long name extension.
     ///
@@ -539,7 +540,11 @@ impl<R: Read + Unpin> Stream for Entries<R> {
     type Item = io::Result<Entry<Archive<R>>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
+        if self.failed {
+            return Poll::Ready(None);
+        }
+
+        let result = (|| loop {
             if self.failed {
                 return Poll::Ready(None);
             }
@@ -586,7 +591,10 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                     has_pending_extension,
                 )) {
                     Some(Ok(entry)) => entry,
-                    Some(Err(err)) => return Poll::Ready(Some(Err(err))),
+                    Some(Err(err)) => {
+                        self.failed = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
                     None => {
                         if self.archive.inner.pax_only && self.pax_extensions.0 {
                             self.pax_extensions.0 = false;
@@ -777,13 +785,20 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             }
 
             return Poll::Ready(Some(Ok(fields.into_entry())));
+        })();
+
+        if matches!(&result, Poll::Ready(Some(Err(_)))) {
+            self.failed = true;
         }
+        result
     }
 }
 
 /// Stream of raw `Entry`s.
 pub struct RawEntries<R: Read + Unpin> {
     archive: Archive<R>,
+    /// Whether the raw parser advanced state before returning an error.
+    failed: bool,
     current: (u64, Option<Header>, usize),
 }
 
@@ -791,18 +806,28 @@ impl<R: Read + Unpin> Stream for RawEntries<R> {
     type Item = io::Result<Entry<Archive<R>>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let archive = self.archive.clone();
-        let (next, current_header, current_header_pos) = &mut self.current;
-        poll_next_raw(
-            archive,
-            next,
-            current_header,
-            current_header_pos,
-            cx,
-            None,
-            false,
-            false,
-        )
+        if self.failed {
+            return Poll::Ready(None);
+        }
+
+        let result = {
+            let archive = self.archive.clone();
+            let (next, current_header, current_header_pos) = &mut self.current;
+            poll_next_raw(
+                archive,
+                next,
+                current_header,
+                current_header_pos,
+                cx,
+                None,
+                false,
+                false,
+            )
+        };
+        if matches!(&result, Poll::Ready(Some(Err(_)))) {
+            self.failed = true;
+        }
+        result
     }
 }
 
