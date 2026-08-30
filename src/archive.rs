@@ -110,9 +110,7 @@ fn reserve_with_limit(
 ) -> io::Result<()> {
     counter
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current
-                .checked_add(amount)
-                .filter(|next| *next <= limit)
+            current.checked_add(amount).filter(|next| *next <= limit)
         })
         .map(|_| ())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, message))
@@ -549,7 +547,9 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             if self.sparse.is_some() {
                 let parsed = {
                     let this = self.as_mut().get_mut();
-                    let Entries { sparse, current, .. } = this;
+                    let Entries {
+                        sparse, current, ..
+                    } = this;
                     sparse.as_mut().unwrap().poll(cx, &mut current.0)
                 };
                 match parsed {
@@ -574,8 +574,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             } else {
                 let has_pending_extension =
                     self.gnu_longname.0 || self.gnu_longlink.0 || self.pax_extensions.0;
-                let (next, current_header, current_header_pos, pax_extensions) =
-                    &mut self.current;
+                let (next, current_header, current_header_pos, pax_extensions) = &mut self.current;
                 match futures_core::ready!(poll_next_raw(
                     archive,
                     next,

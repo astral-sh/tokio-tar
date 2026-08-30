@@ -1226,10 +1226,7 @@ async fn extension_entry_size_limit_accepts_exact_boundary() {
         (EntryType::GNULongLink, b"long-link\0".as_slice()),
         (EntryType::XHeader, b"9 path=a\n".as_slice()),
         (EntryType::SolarisXHeader, b"9 path=a\n".as_slice()),
-        (
-            EntryType::XGlobalHeader,
-            b"17 comment=value\n".as_slice(),
-        ),
+        (EntryType::XGlobalHeader, b"17 comment=value\n".as_slice()),
     ] {
         let bytes = archive_with_extension(entry_type, payload).await;
         let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
@@ -1242,7 +1239,10 @@ async fn extension_entry_size_limit_accepts_exact_boundary() {
 }
 
 async fn two_global_pax_extensions() -> (Vec<u8>, u64) {
-    let records = [pax_record("comment", b"first"), pax_record("comment", b"second")];
+    let records = [
+        pax_record("comment", b"first"),
+        pax_record("comment", b"second"),
+    ];
     let total = records.iter().map(|record| record.len() as u64).sum();
     let mut builder = Builder::new(Vec::new());
 
@@ -1325,11 +1325,7 @@ async fn zero_limits_reject_the_first_matching_entry() {
     let mut archive = ArchiveBuilder::new(Cursor::new(extension.clone()))
         .set_max_extension_entry_size(0)
         .build();
-    let err = t!(archive.entries_raw())
-        .next()
-        .await
-        .unwrap()
-        .unwrap_err();
+    let err = t!(archive.entries_raw()).next().await.unwrap().unwrap_err();
     assert_eq!(
         err.to_string(),
         "archive extension entry size limit exceeded"
@@ -1338,11 +1334,7 @@ async fn zero_limits_reject_the_first_matching_entry() {
     let mut archive = ArchiveBuilder::new(Cursor::new(extension))
         .set_max_total_extension_size(0)
         .build();
-    let err = t!(archive.entries_raw())
-        .next()
-        .await
-        .unwrap()
-        .unwrap_err();
+    let err = t!(archive.entries_raw()).next().await.unwrap().unwrap_err();
     assert_eq!(
         err.to_string(),
         "archive total extension size limit exceeded"
@@ -1352,11 +1344,7 @@ async fn zero_limits_reject_the_first_matching_entry() {
     let mut archive = ArchiveBuilder::new(Cursor::new(regular))
         .set_max_physical_entries(0)
         .build();
-    let err = t!(archive.entries())
-        .next()
-        .await
-        .unwrap()
-        .unwrap_err();
+    let err = t!(archive.entries()).next().await.unwrap().unwrap_err();
     assert_eq!(err.to_string(), "archive physical entry limit exceeded");
 }
 
@@ -2527,10 +2515,7 @@ async fn sparse_continuation_partial_record_is_rejected() {
         } else {
             "when getting offset from sparse header"
         };
-        assert!(
-            err.to_string().contains(expected),
-            "bad error: {err}"
-        );
+        assert!(err.to_string().contains(expected), "bad error: {err}");
     }
 }
 
