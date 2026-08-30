@@ -53,6 +53,7 @@ pub struct ArchiveInner<R> {
     max_extension_entry_size: Option<u64>,
     max_total_extension_size: Option<u64>,
     max_physical_entries: Option<u64>,
+    max_sparse_entries: Option<u64>,
     obj: Mutex<R>,
 }
 
@@ -123,6 +124,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     max_extension_entry_size: Option<u64>,
     max_total_extension_size: Option<u64>,
     max_physical_entries: Option<u64>,
+    max_sparse_entries: Option<u64>,
 }
 
 impl<R: Read + Unpin> ArchiveBuilder<R> {
@@ -139,6 +141,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             max_extension_entry_size: None,
             max_total_extension_size: None,
             max_physical_entries: None,
+            max_sparse_entries: None,
             obj,
         }
     }
@@ -238,6 +241,18 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Limit the number of non-empty map entries in each GNU sparse entry.
+    ///
+    /// Map entries in the main GNU header and every sparse continuation block
+    /// count toward the same per-entry limit. The limit is checked before the
+    /// corresponding sparse I/O map grows. A value of zero rejects every GNU
+    /// sparse entry with a non-empty map. Sparse map entry count is unlimited
+    /// by default.
+    pub fn set_max_sparse_entries(mut self, max: u64) -> Self {
+        self.max_sparse_entries = Some(max);
+        self
+    }
+
     /// Indicate whether to deny symlinks that point outside the destination
     /// directory when unpacking this entry. (Writing to locations outside the
     /// destination directory is _always_ forbidden.)
@@ -261,6 +276,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             max_extension_entry_size,
             max_total_extension_size,
             max_physical_entries,
+            max_sparse_entries,
             obj,
         } = self;
 
@@ -276,6 +292,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 max_extension_entry_size,
                 max_total_extension_size,
                 max_physical_entries,
+                max_sparse_entries,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
                 physical_entries: 0.into(),
@@ -300,6 +317,7 @@ impl<R: Read + Unpin> Archive<R> {
                 max_extension_entry_size: None,
                 max_total_extension_size: None,
                 max_physical_entries: None,
+                max_sparse_entries: None,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
                 physical_entries: 0.into(),
@@ -951,8 +969,13 @@ fn poll_next_raw<R: Read + Unpin>(
         ))));
     }
 
-    let mut data = VecDeque::with_capacity(1);
-    data.push_back(EntryIo::Data(archive.clone().take(size)));
+    let data = if entry_type.is_gnu_sparse() {
+        VecDeque::new()
+    } else {
+        let mut data = VecDeque::with_capacity(1);
+        data.push_back(EntryIo::Data(archive.clone().take(size)));
+        data
+    };
 
     let ret = EntryFields {
         size,
@@ -1073,10 +1096,12 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
 
     let mut cur = 0;
     let mut remaining = entry.size;
+    let mut sparse_entries = 0_u64;
     {
         let data = &mut entry.data;
         let reader = archive.clone();
         let size = entry.size;
+        let max_sparse_entries = archive.inner.max_sparse_entries;
         let mut add_block = |block: &GnuSparseHeader| -> io::Result<_> {
             if block.is_empty() {
                 return Ok(());
@@ -1094,19 +1119,40 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                     "out of order or overlapping sparse \
                      blocks",
                 ));
-            } else if cur < off {
-                let block = io::repeat(0).take(off - cur);
-                data.push_back(EntryIo::Pad(block));
             }
-            cur = off
+
+            let next_cur = off
                 .checked_add(len)
                 .ok_or_else(|| other("more bytes listed in sparse file than u64 can hold"))?;
-            remaining = remaining.checked_sub(len).ok_or_else(|| {
+            let next_remaining = remaining.checked_sub(len).ok_or_else(|| {
                 other(
                     "sparse file consumed more data than the header \
                      listed",
                 )
             })?;
+
+            if let Some(limit) = max_sparse_entries {
+                let next = sparse_entries.checked_add(1).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "archive sparse entry limit exceeded",
+                    )
+                })?;
+                if next > limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "archive sparse entry limit exceeded",
+                    ));
+                }
+                sparse_entries = next;
+            }
+
+            if cur < off {
+                let block = io::repeat(0).take(off - cur);
+                data.push_back(EntryIo::Pad(block));
+            }
+            cur = next_cur;
+            remaining = next_remaining;
             data.push_back(EntryIo::Data(reader.clone().take(len)));
             Ok(())
         };

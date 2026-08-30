@@ -1259,8 +1259,7 @@ async fn total_extension_size_limit_is_cumulative() {
         .build();
     let mut entries = t!(archive.entries());
 
-    let first = t!(entries.next().await.unwrap());
-    drop(first);
+    t!(entries.next().await.unwrap());
     let err = entries.next().await.unwrap().unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     assert_eq!(
@@ -1278,8 +1277,7 @@ async fn total_extension_size_limit_accepts_exact_boundary() {
     let mut entries = t!(archive.entries_raw());
 
     for _ in 0..2 {
-        let entry = t!(entries.next().await.unwrap());
-        drop(entry);
+        t!(entries.next().await.unwrap());
     }
     assert!(entries.next().await.is_none());
 }
@@ -1307,8 +1305,7 @@ async fn physical_entry_limit_counts_regular_and_extension_entries() {
     let mut entries = t!(archive.entries_raw());
 
     for _ in 0..3 {
-        let entry = t!(entries.next().await.unwrap());
-        drop(entry);
+        t!(entries.next().await.unwrap());
     }
     let err = entries.next().await.unwrap().unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -2185,6 +2182,54 @@ async fn sparse_with_trailing() {
     assert_eq!(&s[0x100_000..], "1MB through\n");
 }
 
+const SPARSE_EXT_HEADER_OFFSET: usize = 2560;
+
+fn sparse_with_two_continuation_blocks() -> Vec<u8> {
+    let mut bytes = tar!("sparse.tar").to_vec();
+    // `sparse_ext.txt` has four map entries in its GNU header and two in the
+    // continuation block. Move the sixth entry into a second continuation.
+    let moved_start = SPARSE_EXT_HEADER_OFFSET + 24;
+    let moved = bytes[moved_start..moved_start + 24].to_vec();
+    bytes[moved_start..moved_start + 24].fill(0);
+    bytes[SPARSE_EXT_HEADER_OFFSET + 504] = 1;
+
+    let mut continuation = [0_u8; 512];
+    continuation[..24].copy_from_slice(&moved);
+    let insert_at = SPARSE_EXT_HEADER_OFFSET + 512;
+    bytes.splice(insert_at..insert_at, continuation);
+    bytes
+}
+
+#[tokio::test]
+async fn sparse_entry_limit_accepts_exact_continuation_boundary() {
+    let bytes = sparse_with_two_continuation_blocks();
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(entry.raw_file_position(), 3584);
+}
+
+#[tokio::test]
+async fn sparse_entry_limit_counts_across_continuation_blocks() {
+    let bytes = sparse_with_two_continuation_blocks();
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(5)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(err.to_string(), "archive sparse entry limit exceeded");
+}
+
 #[tokio::test]
 async fn sparse_continuation_partial_record_is_rejected() {
     // `sparse_ext.txt` begins an extended sparse header at offset 2560. Its
@@ -2192,14 +2237,39 @@ async fn sparse_continuation_partial_record_is_rejected() {
     // chunk contain either an offset or a length without its paired field.
     for field_offset in [0, 12] {
         let mut bytes = tar!("sparse.tar").to_vec();
-        bytes[2560 + 2 * 24 + field_offset] = b'1';
-        let mut ar = Archive::new(&bytes[..]);
+        bytes[SPARSE_EXT_HEADER_OFFSET + 2 * 24 + field_offset] = b'1';
+        let mut ar = ArchiveBuilder::new(&bytes[..])
+            .set_max_sparse_entries(6)
+            .build();
         let mut entries = t!(ar.entries());
 
         assert!(entries.next().await.unwrap().is_ok());
         assert!(entries.next().await.unwrap().is_ok());
-        assert!(matches!(entries.next().await, Some(Err(_))));
+        let err = entries.next().await.unwrap().unwrap_err();
+        let expected = if field_offset == 0 {
+            "when getting length from sparse header"
+        } else {
+            "when getting offset from sparse header"
+        };
+        assert!(
+            err.to_string().contains(expected),
+            "bad error: {err}"
+        );
     }
+}
+
+#[tokio::test]
+async fn sparse_entry_limit_preserves_truncated_continuation_error() {
+    let bytes = &tar!("sparse.tar")[..SPARSE_EXT_HEADER_OFFSET];
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_sparse_entries(6)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "failed to read extension");
 }
 
 #[tokio::test]
