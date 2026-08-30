@@ -1167,6 +1167,182 @@ async fn archive_with_header(header: &Header) -> Vec<u8> {
     t!(builder.into_inner().await)
 }
 
+fn extension_header_only(entry_type: EntryType, size: u64) -> Vec<u8> {
+    let mut header = Header::new_ustar();
+    t!(header.set_path("extension"));
+    header.set_entry_type(entry_type);
+    header.set_size(size);
+    header.set_cksum();
+    header.as_bytes().to_vec()
+}
+
+async fn archive_with_extension(entry_type: EntryType, payload: &[u8]) -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    let mut header = Header::new_ustar();
+    t!(header.set_path("extension"));
+    header.set_entry_type(entry_type);
+    header.set_size(payload.len() as u64);
+    header.set_cksum();
+    t!(builder.append(&header, payload).await);
+    t!(builder.into_inner().await)
+}
+
+#[tokio::test]
+async fn extension_entry_size_limit_precedes_payload_allocation() {
+    const LIMIT: u64 = 128 * 1024;
+
+    for entry_type in [
+        EntryType::GNULongName,
+        EntryType::GNULongLink,
+        EntryType::XHeader,
+        EntryType::SolarisXHeader,
+        EntryType::XGlobalHeader,
+    ] {
+        let bytes = extension_header_only(entry_type, LIMIT + 1);
+        let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+            .set_max_extension_entry_size(LIMIT)
+            .build();
+        let err = t!(archive.entries()).next().await.unwrap().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "archive extension entry size limit exceeded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn extension_entry_size_limit_accepts_exact_boundary() {
+    for (entry_type, payload) in [
+        (EntryType::GNULongName, b"long-name\0".as_slice()),
+        (EntryType::GNULongLink, b"long-link\0".as_slice()),
+        (EntryType::XHeader, b"9 path=a\n".as_slice()),
+        (EntryType::SolarisXHeader, b"9 path=a\n".as_slice()),
+        (
+            EntryType::XGlobalHeader,
+            b"17 comment=value\n".as_slice(),
+        ),
+    ] {
+        let bytes = archive_with_extension(entry_type, payload).await;
+        let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+            .set_max_extension_entry_size(payload.len() as u64)
+            .build();
+        let entry = t!(t!(archive.entries_raw()).next().await.unwrap());
+
+        assert_eq!(entry.header().entry_type(), entry_type);
+    }
+}
+
+async fn two_global_pax_extensions() -> (Vec<u8>, u64) {
+    let records = [pax_record("comment", b"first"), pax_record("comment", b"second")];
+    let total = records.iter().map(|record| record.len() as u64).sum();
+    let mut builder = Builder::new(Vec::new());
+
+    for record in records {
+        let mut header = Header::new_ustar();
+        t!(header.set_path("global-pax"));
+        header.set_entry_type(EntryType::XGlobalHeader);
+        header.set_size(record.len() as u64);
+        header.set_cksum();
+        t!(builder.append(&header, &record[..]).await);
+    }
+
+    (t!(builder.into_inner().await), total)
+}
+
+#[tokio::test]
+async fn total_extension_size_limit_is_cumulative() {
+    let (bytes, total) = two_global_pax_extensions().await;
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_total_extension_size(total - 1)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    let first = t!(entries.next().await.unwrap());
+    drop(first);
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        err.to_string(),
+        "archive total extension size limit exceeded"
+    );
+}
+
+#[tokio::test]
+async fn total_extension_size_limit_accepts_exact_boundary() {
+    let (bytes, total) = two_global_pax_extensions().await;
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_max_total_extension_size(total)
+        .build();
+    let mut entries = t!(archive.entries_raw());
+
+    for _ in 0..2 {
+        let entry = t!(entries.next().await.unwrap());
+        drop(entry);
+    }
+    assert!(entries.next().await.is_none());
+}
+
+async fn two_regular_entries() -> Vec<u8> {
+    let mut builder = Builder::new(Vec::new());
+    for path in ["first", "second"] {
+        let mut header = Header::new_ustar();
+        t!(header.set_path(path));
+        header.set_size(0);
+        header.set_cksum();
+        t!(builder.append(&header, io::empty()).await);
+    }
+    t!(builder.into_inner().await)
+}
+
+#[tokio::test]
+async fn physical_entry_limit_counts_regular_and_extension_entries() {
+    let (mut bytes, _) = two_global_pax_extensions().await;
+    bytes.extend(two_regular_entries().await);
+    let mut archive = ArchiveBuilder::new(Cursor::new(bytes))
+        .set_ignore_zeros(true)
+        .set_max_physical_entries(3)
+        .build();
+    let mut entries = t!(archive.entries_raw());
+
+    for _ in 0..3 {
+        let entry = t!(entries.next().await.unwrap());
+        drop(entry);
+    }
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(err.to_string(), "archive physical entry limit exceeded");
+}
+
+#[tokio::test]
+async fn zero_limits_reject_the_first_matching_entry() {
+    let extension = archive_with_extension(EntryType::XGlobalHeader, b"9 path=a\n").await;
+    let mut archive = ArchiveBuilder::new(Cursor::new(extension))
+        .set_max_total_extension_size(0)
+        .build();
+    let err = t!(archive.entries_raw())
+        .next()
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive total extension size limit exceeded"
+    );
+
+    let regular = two_regular_entries().await;
+    let mut archive = ArchiveBuilder::new(Cursor::new(regular))
+        .set_max_physical_entries(0)
+        .build();
+    let err = t!(archive.entries())
+        .next()
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.to_string(), "archive physical entry limit exceeded");
+}
+
 async fn local_pax_archive(header: &Header) -> Vec<u8> {
     let mut builder = Builder::new(Vec::new());
     append_local_pax_header(&mut builder).await;

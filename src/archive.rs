@@ -41,6 +41,8 @@ impl<R: Read + Unpin> Clone for Archive<R> {
 #[derive(Debug)]
 pub struct ArchiveInner<R> {
     pos: AtomicU64,
+    physical_entries: AtomicU64,
+    extension_bytes: AtomicU64,
     unpack_xattrs: bool,
     preserve_permissions: bool,
     preserve_mtime: bool,
@@ -48,7 +50,64 @@ pub struct ArchiveInner<R> {
     overwrite: bool,
     ignore_zeros: bool,
     pax_only: bool,
+    max_extension_entry_size: Option<u64>,
+    max_total_extension_size: Option<u64>,
+    max_physical_entries: Option<u64>,
     obj: Mutex<R>,
+}
+
+impl<R> ArchiveInner<R> {
+    fn reserve_entry(&self, size: u64, is_extension: bool) -> io::Result<()> {
+        if let Some(limit) = self.max_physical_entries {
+            reserve_with_limit(
+                &self.physical_entries,
+                1,
+                limit,
+                "archive physical entry limit exceeded",
+            )?;
+        }
+
+        if !is_extension {
+            return Ok(());
+        }
+
+        if self
+            .max_extension_entry_size
+            .is_some_and(|limit| size > limit)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive extension entry size limit exceeded",
+            ));
+        }
+
+        if let Some(limit) = self.max_total_extension_size {
+            reserve_with_limit(
+                &self.extension_bytes,
+                size,
+                limit,
+                "archive total extension size limit exceeded",
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn reserve_with_limit(
+    counter: &AtomicU64,
+    amount: u64,
+    limit: u64,
+    message: &'static str,
+) -> io::Result<()> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current
+                .checked_add(amount)
+                .filter(|next| *next <= limit)
+        })
+        .map(|_| ())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
 /// Configure the archive.
@@ -61,6 +120,9 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     overwrite: bool,
     ignore_zeros: bool,
     pax_only: bool,
+    max_extension_entry_size: Option<u64>,
+    max_total_extension_size: Option<u64>,
+    max_physical_entries: Option<u64>,
 }
 
 impl<R: Read + Unpin> ArchiveBuilder<R> {
@@ -74,6 +136,9 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             overwrite: true,
             ignore_zeros: false,
             pax_only: false,
+            max_extension_entry_size: None,
+            max_total_extension_size: None,
+            max_physical_entries: None,
             obj,
         }
     }
@@ -139,6 +204,40 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         self
     }
 
+    /// Limit the declared payload size of each metadata extension entry.
+    ///
+    /// This applies to GNU long name and long link entries and to local and
+    /// global PAX extension entries. The limit is checked before the extension
+    /// payload is buffered. A value of zero rejects every such entry. Extension
+    /// entry sizes are unlimited by default.
+    pub fn set_max_extension_entry_size(mut self, max: u64) -> Self {
+        self.max_extension_entry_size = Some(max);
+        self
+    }
+
+    /// Limit the total declared payload size of metadata extension entries.
+    ///
+    /// This cumulative limit covers GNU long name and long link entries and
+    /// local and global PAX extension entries. It is shared by all entry streams
+    /// created from this archive. A value of zero rejects every such entry.
+    /// Total extension entry size is unlimited by default.
+    pub fn set_max_total_extension_size(mut self, max: u64) -> Self {
+        self.max_total_extension_size = Some(max);
+        self
+    }
+
+    /// Limit the number of physical entry headers in the archive.
+    ///
+    /// Extension entries count toward this limit. GNU sparse continuation
+    /// blocks are part of one physical entry and do not count separately. The
+    /// limit is shared by all entry streams created from this archive. A value
+    /// of zero rejects every entry. Physical entry count is unlimited by
+    /// default.
+    pub fn set_max_physical_entries(mut self, max: u64) -> Self {
+        self.max_physical_entries = Some(max);
+        self
+    }
+
     /// Indicate whether to deny symlinks that point outside the destination
     /// directory when unpacking this entry. (Writing to locations outside the
     /// destination directory is _always_ forbidden.)
@@ -159,6 +258,9 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             overwrite,
             ignore_zeros,
             pax_only,
+            max_extension_entry_size,
+            max_total_extension_size,
+            max_physical_entries,
             obj,
         } = self;
 
@@ -171,8 +273,13 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
                 overwrite,
                 ignore_zeros,
                 pax_only,
+                max_extension_entry_size,
+                max_total_extension_size,
+                max_physical_entries,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
+                physical_entries: 0.into(),
+                extension_bytes: 0.into(),
             }),
         }
     }
@@ -190,8 +297,13 @@ impl<R: Read + Unpin> Archive<R> {
                 overwrite: true,
                 ignore_zeros: false,
                 pax_only: false,
+                max_extension_entry_size: None,
+                max_total_extension_size: None,
+                max_physical_entries: None,
                 obj: Mutex::new(obj),
                 pos: 0.into(),
+                physical_entries: 0.into(),
+                extension_bytes: 0.into(),
             }),
         }
     }
@@ -739,6 +851,8 @@ fn poll_next_raw<R: Read + Unpin>(
         || header.is_pax_local_extensions()
         || entry_type.is_pax_global_extensions();
 
+    archive.inner.reserve_entry(size, is_extension_header)?;
+
     // the size above will be overriden by the pax data if it has a size field.
     // same for uid and gid, which will be overridden in the header itself.
     let mut has_gnu_sparse_metadata = false;
@@ -1125,4 +1239,38 @@ fn poll_skip<R: Read + Unpin>(
     }
 
     Poll::Ready(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_with_limit_accepts_exact_boundary() {
+        let counter = AtomicU64::new(7);
+
+        reserve_with_limit(&counter, 3, 10, "limit exceeded").unwrap();
+
+        assert_eq!(counter.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn reserve_with_limit_does_not_mutate_counter_on_rejection() {
+        let counter = AtomicU64::new(7);
+
+        let err = reserve_with_limit(&counter, 4, 10, "limit exceeded").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(counter.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn reserve_with_limit_rejects_counter_overflow() {
+        let counter = AtomicU64::new(u64::MAX);
+
+        let err = reserve_with_limit(&counter, 1, u64::MAX, "limit exceeded").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 }
