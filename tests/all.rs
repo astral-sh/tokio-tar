@@ -2287,7 +2287,7 @@ async fn sparse_parser_resumes_alternating_pending_reads() {
         b"sparse.txt".as_slice(),
     ] {
         let entry = t!(entries.next().await.unwrap());
-        assert_eq!(&*t!(entry.header().path_bytes()), expected);
+        assert_eq!(&*entry.header().path_bytes(), expected);
     }
     assert!(entries.next().await.is_none());
 }
@@ -2303,11 +2303,13 @@ async fn raw_sparse_entries_retain_their_stored_payload() {
     let mut payload = Vec::new();
 
     t!(entry.read_to_end(&mut payload).await);
-    assert_eq!(payload, b"test\n");
+    assert_eq!(payload.len(), 512);
+    assert_eq!(&payload[..5], b"test\n");
+    assert!(payload[5..].iter().all(|byte| *byte == 0));
 
     t!(entries.next().await.unwrap());
     let extended = t!(entries.next().await.unwrap());
-    assert_eq!(&*t!(extended.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(&*extended.header().path_bytes(), b"sparse_ext.txt");
 }
 
 #[tokio::test]
@@ -2384,7 +2386,7 @@ async fn sparse_parser_survives_cancelled_next_future() {
     drop(next);
 
     let entry = t!(entries.next().await.unwrap());
-    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(&*entry.header().path_bytes(), b"sparse_ext.txt");
     assert_eq!(entry.raw_file_position(), 3072);
 }
 
@@ -2399,7 +2401,7 @@ async fn sparse_entry_limit_accepts_exact_continuation_boundary() {
     t!(entries.next().await.unwrap());
     t!(entries.next().await.unwrap());
     let entry = t!(entries.next().await.unwrap());
-    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(&*entry.header().path_bytes(), b"sparse_ext.txt");
     assert_eq!(entry.raw_file_position(), 3584);
 }
 
@@ -2430,7 +2432,7 @@ async fn sparse_continuation_block_limit_accepts_exact_empty_chain() {
     t!(entries.next().await.unwrap());
     t!(entries.next().await.unwrap());
     let entry = t!(entries.next().await.unwrap());
-    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(&*entry.header().path_bytes(), b"sparse_ext.txt");
     assert_eq!(entry.raw_file_position(), 4096);
 }
 
