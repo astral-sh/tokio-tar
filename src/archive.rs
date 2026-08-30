@@ -75,7 +75,7 @@ impl<R> ArchiveInner<R> {
 
         if self
             .max_extension_entry_size
-            .is_some_and(|limit| size > limit)
+            .is_some_and(|limit| limit == 0 || size > limit)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -84,6 +84,12 @@ impl<R> ArchiveInner<R> {
         }
 
         if let Some(limit) = self.max_total_extension_size {
+            if limit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive total extension size limit exceeded",
+                ));
+            }
             reserve_with_limit(
                 &self.extension_bytes,
                 size,
@@ -250,7 +256,9 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
     /// count toward the same per-entry limit. The limit is checked before the
     /// corresponding sparse I/O map grows. A value of zero rejects every GNU
     /// sparse entry with a non-empty map. Sparse map entry count is unlimited
-    /// by default.
+    /// by default. This limit applies to logical entry streams created by
+    /// [`Archive::entries`] and to unpacking. It is not applied by
+    /// [`Archive::entries_raw`], which does not interpret GNU sparse maps.
     pub fn set_max_sparse_entries(mut self, max: u64) -> Self {
         self.max_sparse_entries = Some(max);
         self
@@ -261,7 +269,10 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
     /// Every 512-byte sparse continuation block counts, including blocks with
     /// no map entries. The limit is checked before each block is read. A value
     /// of zero rejects every GNU sparse entry that declares a continuation
-    /// block. Sparse continuation block count is unlimited by default.
+    /// block. Sparse continuation block count is unlimited by default. This
+    /// limit applies to logical entry streams created by [`Archive::entries`]
+    /// and to unpacking. It is not applied by [`Archive::entries_raw`], which
+    /// returns the stored sparse payload without parsing continuation blocks.
     pub fn set_max_sparse_continuation_blocks(mut self, max: u64) -> Self {
         self.max_sparse_continuation_blocks = Some(max);
         self
@@ -370,7 +381,9 @@ impl<R: Read + Unpin> Archive<R> {
         Ok(Entries {
             archive: self.clone(),
             pending: None,
-            current: (0, None, 0, None, None),
+            sparse: None,
+            failed: false,
+            current: (0, None, 0, None),
             gnu_longlink: (false, None),
             gnu_longname: (false, None),
             pax_extensions: (false, None),
@@ -497,15 +510,13 @@ impl<R: Read + Unpin> Archive<R> {
 /// Stream of `Entry`s.
 pub struct Entries<R: Read + Unpin> {
     archive: Archive<R>,
-    current: (
-        u64,
-        Option<Header>,
-        usize,
-        Option<GnuExtSparseHeader>,
-        Option<Vec<u8>>,
-    ),
+    current: (u64, Option<Header>, usize, Option<Vec<u8>>),
     /// The [`Entry`] that is currently being processed.
     pending: Option<Entry<Archive<R>>>,
+    /// Persistent parser state for a GNU sparse entry.
+    sparse: Option<SparseState<R>>,
+    /// Whether a sparse parser error made the stream unsafe to resume.
+    failed: bool,
     /// GNU long name extension.
     ///
     /// The first element is a flag indicating whether the long name entry has been fully read.
@@ -526,20 +537,36 @@ pub struct Entries<R: Read + Unpin> {
     pax_extensions: (bool, Option<Vec<u8>>),
 }
 
-macro_rules! ready_err {
-    ($val:expr) => {
-        match futures_core::ready!($val) {
-            Ok(val) => val,
-            Err(err) => return Poll::Ready(Some(Err(err))),
-        }
-    };
-}
-
 impl<R: Read + Unpin> Stream for Entries<R> {
     type Item = io::Result<Entry<Archive<R>>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
+            if self.failed {
+                return Poll::Ready(None);
+            }
+
+            if self.sparse.is_some() {
+                let parsed = {
+                    let this = self.as_mut().get_mut();
+                    let Entries { sparse, current, .. } = this;
+                    sparse.as_mut().unwrap().poll(cx, &mut current.0)
+                };
+                match parsed {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(())) => {
+                        let state = self.as_mut().get_mut().sparse.take().unwrap();
+                        return Poll::Ready(Some(Ok(state.into_entry())));
+                    }
+                    Poll::Ready(Err(err)) => {
+                        let this = self.as_mut().get_mut();
+                        this.sparse = None;
+                        this.failed = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
+
             let archive = self.archive.clone();
 
             let entry = if let Some(entry) = self.pending.take() {
@@ -547,7 +574,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             } else {
                 let has_pending_extension =
                     self.gnu_longname.0 || self.gnu_longlink.0 || self.pax_extensions.0;
-                let (next, current_header, current_header_pos, _, pax_extensions) =
+                let (next, current_header, current_header_pos, pax_extensions) =
                     &mut self.current;
                 match futures_core::ready!(poll_next_raw(
                     archive,
@@ -718,7 +745,7 @@ impl<R: Read + Unpin> Stream for Entries<R> {
                 }
 
                 self.pax_extensions.0 = true;
-                self.current.4 = self.pax_extensions.1.clone();
+                self.current.3 = self.pax_extensions.1.clone();
                 continue;
             }
 
@@ -734,20 +761,21 @@ impl<R: Read + Unpin> Stream for Entries<R> {
             if self.pax_extensions.0 {
                 fields.pax_extensions = self.pax_extensions.1.take();
                 self.pax_extensions.0 = false;
-                self.current.4 = None;
+                self.current.3 = None;
             }
 
-            let archive = self.archive.clone();
-            let (next, _, current_pos, current_ext, _pax_extensions) = &mut self.current;
-
-            ready_err!(poll_parse_sparse_header(
-                archive,
-                next,
-                current_ext,
-                current_pos,
-                &mut fields,
-                cx,
-            ));
+            if fields.header.entry_type().is_gnu_sparse() {
+                match SparseState::new(self.archive.clone(), fields) {
+                    Ok(state) => {
+                        self.sparse = Some(state);
+                        continue;
+                    }
+                    Err(err) => {
+                        self.failed = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
 
             return Poll::Ready(Some(Ok(fields.into_entry())));
         }
@@ -986,7 +1014,7 @@ fn poll_next_raw<R: Read + Unpin>(
         ))));
     }
 
-    let data = if entry_type.is_gnu_sparse() {
+    let data = if entry_type.is_gnu_sparse() && apply_pax_header_fields {
         VecDeque::new()
     } else {
         let mut data = VecDeque::with_capacity(1);
@@ -1073,174 +1101,212 @@ fn parse_pax_decimal(value: &str, parse_error: &'static str) -> io::Result<u64> 
     value.parse::<u64>().map_err(|_e| other(parse_error))
 }
 
-fn poll_parse_sparse_header<R: Read + Unpin>(
-    mut archive: Archive<R>,
-    next: &mut u64,
-    current_ext: &mut Option<GnuExtSparseHeader>,
-    current_ext_pos: &mut usize,
-    entry: &mut EntryFields<Archive<R>>,
-    cx: &mut Context<'_>,
-) -> Poll<io::Result<()>> {
-    if !entry.header.entry_type().is_gnu_sparse() {
-        return Poll::Ready(Ok(()));
+struct SparseState<R: Read + Unpin> {
+    archive: Archive<R>,
+    entry: EntryFields<Archive<R>>,
+    cur: u64,
+    remaining: u64,
+    sparse_entries: u64,
+    continuation_blocks: u64,
+    continuation: GnuExtSparseHeader,
+    continuation_pos: usize,
+    needs_continuation: bool,
+    continuation_reserved: bool,
+}
+
+impl<R: Read + Unpin> SparseState<R> {
+    fn new(archive: Archive<R>, mut entry: EntryFields<Archive<R>>) -> io::Result<Self> {
+        let gnu = entry
+            .header
+            .as_gnu()
+            .ok_or_else(|| other("sparse entry type listed but not GNU header"))?;
+        let needs_continuation = gnu.is_extended();
+        let remaining = entry.size;
+        entry.data.clear();
+
+        let mut state = Self {
+            archive,
+            entry,
+            cur: 0,
+            remaining,
+            sparse_entries: 0,
+            continuation_blocks: 0,
+            continuation: GnuExtSparseHeader::new(),
+            continuation_pos: 0,
+            needs_continuation,
+            continuation_reserved: false,
+        };
+
+        for index in 0..4 {
+            let block = {
+                let gnu = state.entry.header.as_gnu().unwrap();
+                parse_sparse_block(&gnu.sparse[index])?
+            };
+            if let Some((offset, length)) = block {
+                state.add_block(offset, length)?;
+            }
+        }
+
+        Ok(state)
     }
 
-    let gnu = match entry.header.as_gnu() {
-        Some(gnu) => gnu,
-        None => return Poll::Ready(Err(other("sparse entry type listed but not GNU header"))),
-    };
-
-    // Sparse files are represented internally as a list of blocks that are
-    // read. Blocks are either a bunch of 0's or they're data from the
-    // underlying archive.
-    //
-    // Blocks of a sparse file are described by the `GnuSparseHeader`
-    // structure, some of which are contained in `GnuHeader` but some of
-    // which may also be contained after the first header in further
-    // headers.
-    //
-    // We read off all the blocks here and use the `add_block` function to
-    // incrementally add them to the list of I/O block (in `entry.data`).
-    // The `add_block` function also validates that each chunk comes after
-    // the previous, we don't overrun the end of the file, and each block is
-    // aligned to a 512-byte boundary in the archive itself.
-    //
-    // At the end we verify that the sparse file size (`Header::size`) is
-    // the same as the current offset (described by the list of blocks) as
-    // well as the amount of data read equals the size of the entry
-    // (`Header::entry_size`).
-    entry.data.clear();
-
-    let mut cur = 0;
-    let mut remaining = entry.size;
-    let mut sparse_entries = 0_u64;
-    let mut continuation_blocks = 0_u64;
-    {
-        let data = &mut entry.data;
-        let reader = archive.clone();
-        let size = entry.size;
-        let max_sparse_entries = archive.inner.max_sparse_entries;
-        let mut add_block = |block: &GnuSparseHeader| -> io::Result<_> {
-            if block.is_empty() {
-                return Ok(());
-            }
-            let off = block.offset()?;
-            let len = block.length()?;
-
-            if len != 0 && (size - remaining) % BLOCK_SIZE != 0 {
-                return Err(other(
-                    "previous block in sparse file was not \
-                     aligned to 512-byte boundary",
-                ));
-            } else if off < cur {
-                return Err(other(
-                    "out of order or overlapping sparse \
-                     blocks",
-                ));
+    fn poll(&mut self, cx: &mut Context<'_>, next: &mut u64) -> Poll<io::Result<()>> {
+        while self.needs_continuation {
+            if let Err(err) = self.reserve_continuation() {
+                return Poll::Ready(Err(err));
             }
 
-            let next_cur = off
-                .checked_add(len)
-                .ok_or_else(|| other("more bytes listed in sparse file than u64 can hold"))?;
-            let next_remaining = remaining.checked_sub(len).ok_or_else(|| {
-                other(
-                    "sparse file consumed more data than the header \
-                     listed",
+            match futures_core::ready!(poll_try_read_all(
+                &mut self.archive,
+                cx,
+                self.continuation.as_mut_bytes(),
+                &mut self.continuation_pos,
+            )) {
+                Ok(true) => {}
+                Ok(false) => return Poll::Ready(Err(other("failed to read extension"))),
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+
+            self.continuation_reserved = false;
+            if let Err(err) = advance_sparse_positions(next, &mut self.entry.file_pos) {
+                return Poll::Ready(Err(err));
+            }
+
+            for index in 0..self.continuation.sparse.len() {
+                let block = parse_sparse_block(&self.continuation.sparse[index]);
+                let block = match block {
+                    Ok(block) => block,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                if let Some((offset, length)) = block {
+                    if let Err(err) = self.add_block(offset, length) {
+                        return Poll::Ready(Err(err));
+                    }
+                }
+            }
+            self.needs_continuation = self.continuation.is_extended();
+        }
+
+        let real_size = self.entry.header.as_gnu().unwrap().real_size();
+        let real_size = match real_size {
+            Ok(real_size) => real_size,
+            Err(err) => return Poll::Ready(Err(err)),
+        };
+        if self.cur != real_size {
+            return Poll::Ready(Err(other(
+                "mismatch in sparse file chunks and \
+                 size in header",
+            )));
+        }
+        self.entry.size = self.cur;
+        if self.remaining > 0 {
+            return Poll::Ready(Err(other(
+                "mismatch in sparse file chunks and \
+                 entry size in header",
+            )));
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    fn add_block(&mut self, offset: u64, length: u64) -> io::Result<()> {
+        if length != 0 && (self.entry.size - self.remaining) % BLOCK_SIZE != 0 {
+            return Err(other(
+                "previous block in sparse file was not \
+                 aligned to 512-byte boundary",
+            ));
+        }
+        if offset < self.cur {
+            return Err(other(
+                "out of order or overlapping sparse \
+                 blocks",
+            ));
+        }
+
+        let next_cur = offset
+            .checked_add(length)
+            .ok_or_else(|| other("more bytes listed in sparse file than u64 can hold"))?;
+        let next_remaining = self.remaining.checked_sub(length).ok_or_else(|| {
+            other(
+                "sparse file consumed more data than the header \
+                 listed",
+            )
+        })?;
+
+        if let Some(limit) = self.archive.inner.max_sparse_entries {
+            let next = self.sparse_entries.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive sparse entry limit exceeded",
                 )
             })?;
-
-            if let Some(limit) = max_sparse_entries {
-                let next = sparse_entries.checked_add(1).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "archive sparse entry limit exceeded",
-                    )
-                })?;
-                if next > limit {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "archive sparse entry limit exceeded",
-                    ));
-                }
-                sparse_entries = next;
+            if next > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive sparse entry limit exceeded",
+                ));
             }
-
-            if cur < off {
-                let block = io::repeat(0).take(off - cur);
-                data.push_back(EntryIo::Pad(block));
-            }
-            cur = next_cur;
-            remaining = next_remaining;
-            data.push_back(EntryIo::Data(reader.clone().take(len)));
-            Ok(())
-        };
-        for block in gnu.sparse.iter() {
-            add_block(block)?
+            self.sparse_entries = next;
         }
-        if gnu.is_extended() {
-            let started_header = current_ext.is_some();
-            if !started_header {
-                let mut ext = GnuExtSparseHeader::new();
-                ext.isextended[0] = 1;
-                *current_ext = Some(ext);
-                *current_ext_pos = 0;
-            }
 
-            let ext = current_ext.as_mut().unwrap();
-            while ext.is_extended() {
-                if let Some(limit) = archive.inner.max_sparse_continuation_blocks {
-                    let next = continuation_blocks.checked_add(1).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "archive sparse continuation block limit exceeded",
-                        )
-                    })?;
-                    if next > limit {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "archive sparse continuation block limit exceeded",
-                        )));
-                    }
-                    continuation_blocks = next;
-                }
-
-                match futures_core::ready!(poll_try_read_all(
-                    &mut archive,
-                    cx,
-                    ext.as_mut_bytes(),
-                    current_ext_pos,
-                )) {
-                    Ok(true) => {}
-                    Ok(false) => return Poll::Ready(Err(other("failed to read extension"))),
-                    Err(err) => return Poll::Ready(Err(err)),
-                }
-
-                *next += BLOCK_SIZE;
-                for block in ext.sparse.iter() {
-                    add_block(block)?;
-                }
-                entry.file_pos = entry
-                    .file_pos
-                    .checked_add(BLOCK_SIZE)
-                    .ok_or_else(|| other("position overflow"))?;
-            }
+        if self.cur < offset {
+            let block = io::repeat(0).take(offset - self.cur);
+            self.entry.data.push_back(EntryIo::Pad(block));
         }
-    }
-    if cur != gnu.real_size()? {
-        return Poll::Ready(Err(other(
-            "mismatch in sparse file chunks and \
-             size in header",
-        )));
-    }
-    entry.size = cur;
-    if remaining > 0 {
-        return Poll::Ready(Err(other(
-            "mismatch in sparse file chunks and \
-             entry size in header",
-        )));
+        self.cur = next_cur;
+        self.remaining = next_remaining;
+        self.entry
+            .data
+            .push_back(EntryIo::Data(self.archive.clone().take(length)));
+        Ok(())
     }
 
-    Poll::Ready(Ok(()))
+    fn reserve_continuation(&mut self) -> io::Result<()> {
+        if self.continuation_reserved {
+            return Ok(());
+        }
+
+        if let Some(limit) = self.archive.inner.max_sparse_continuation_blocks {
+            let next = self.continuation_blocks.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive sparse continuation block limit exceeded",
+                )
+            })?;
+            if next > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive sparse continuation block limit exceeded",
+                ));
+            }
+            self.continuation_blocks = next;
+        }
+        self.continuation_reserved = true;
+        Ok(())
+    }
+
+    fn into_entry(self) -> Entry<Archive<R>> {
+        self.entry.into_entry()
+    }
+}
+
+fn parse_sparse_block(block: &GnuSparseHeader) -> io::Result<Option<(u64, u64)>> {
+    if block.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((block.offset()?, block.length()?)))
+}
+
+fn advance_sparse_positions(next: &mut u64, file_pos: &mut u64) -> io::Result<()> {
+    let advanced_next = next
+        .checked_add(BLOCK_SIZE)
+        .ok_or_else(|| other("position overflow"))?;
+    let advanced_file_pos = file_pos
+        .checked_add(BLOCK_SIZE)
+        .ok_or_else(|| other("position overflow"))?;
+    *next = advanced_next;
+    *file_pos = advanced_file_pos;
+    Ok(())
 }
 
 impl<R: Read + Unpin> Read for Archive<R> {
@@ -1352,5 +1418,40 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn advance_sparse_positions_accepts_exact_boundary() {
+        let mut next = u64::MAX - BLOCK_SIZE;
+        let mut file_pos = u64::MAX - BLOCK_SIZE;
+
+        advance_sparse_positions(&mut next, &mut file_pos).unwrap();
+
+        assert_eq!(next, u64::MAX);
+        assert_eq!(file_pos, u64::MAX);
+    }
+
+    #[test]
+    fn advance_sparse_positions_does_not_commit_on_next_overflow() {
+        let mut next = u64::MAX - BLOCK_SIZE + 1;
+        let mut file_pos = 17;
+
+        let err = advance_sparse_positions(&mut next, &mut file_pos).unwrap_err();
+
+        assert_eq!(err.to_string(), "position overflow");
+        assert_eq!(next, u64::MAX - BLOCK_SIZE + 1);
+        assert_eq!(file_pos, 17);
+    }
+
+    #[test]
+    fn advance_sparse_positions_does_not_commit_on_file_position_overflow() {
+        let mut next = 23;
+        let mut file_pos = u64::MAX - BLOCK_SIZE + 1;
+
+        let err = advance_sparse_positions(&mut next, &mut file_pos).unwrap_err();
+
+        assert_eq!(err.to_string(), "position overflow");
+        assert_eq!(next, 23);
+        assert_eq!(file_pos, u64::MAX - BLOCK_SIZE + 1);
     }
 }

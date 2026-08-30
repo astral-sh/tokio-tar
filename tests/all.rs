@@ -5,8 +5,15 @@ extern crate tempfile;
 extern crate xattr;
 
 use std::{
+    future::Future,
     io::Cursor,
     path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    task::Poll,
     time::UNIX_EPOCH,
 };
 use tokio::{
@@ -1314,7 +1321,20 @@ async fn physical_entry_limit_counts_regular_and_extension_entries() {
 
 #[tokio::test]
 async fn zero_limits_reject_the_first_matching_entry() {
-    let extension = archive_with_extension(EntryType::XGlobalHeader, b"9 path=a\n").await;
+    let extension = archive_with_extension(EntryType::XGlobalHeader, b"").await;
+    let mut archive = ArchiveBuilder::new(Cursor::new(extension.clone()))
+        .set_max_extension_entry_size(0)
+        .build();
+    let err = t!(archive.entries_raw())
+        .next()
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive extension entry size limit exceeded"
+    );
+
     let mut archive = ArchiveBuilder::new(Cursor::new(extension))
         .set_max_total_extension_size(0)
         .build();
@@ -1404,8 +1424,6 @@ async fn pending_pax_record_does_not_cross_ignored_terminator() {
 
 #[tokio::test]
 async fn pax_pending_interrupted() {
-    use std::pin::Pin;
-
     /// A [`AsyncRead`] that returns `Pending` on every other poll.
     struct PendingReader<R> {
         inner: R,
@@ -1437,8 +1455,6 @@ async fn pax_pending_interrupted() {
             cx: &mut std::task::Context<'_>,
             buf: &mut io::ReadBuf<'_>,
         ) -> std::task::Poll<io::Result<()>> {
-            use std::task::Poll;
-
             let (inner, n) = self.project();
 
             let pend = *n % 2 == 0;
@@ -2184,6 +2200,54 @@ async fn sparse_with_trailing() {
 
 const SPARSE_EXT_HEADER_OFFSET: usize = 2560;
 
+struct AlternatingPendingReader {
+    bytes: Vec<u8>,
+    position: Arc<AtomicUsize>,
+    max_read: usize,
+    return_pending: bool,
+}
+
+impl AlternatingPendingReader {
+    fn new(bytes: Vec<u8>, max_read: usize) -> (Self, Arc<AtomicUsize>) {
+        let position = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                bytes,
+                position: position.clone(),
+                max_read,
+                return_pending: true,
+            },
+            position,
+        )
+    }
+}
+
+impl AsyncRead for AlternatingPendingReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.return_pending {
+            this.return_pending = false;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        this.return_pending = true;
+
+        let position = this.position.load(Ordering::Relaxed);
+        let amount = this
+            .max_read
+            .min(buf.remaining())
+            .min(this.bytes.len() - position);
+        let end = position + amount;
+        buf.put_slice(&this.bytes[position..end]);
+        this.position.store(end, Ordering::Relaxed);
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn sparse_with_two_continuation_blocks() -> Vec<u8> {
     let mut bytes = tar!("sparse.tar").to_vec();
     // `sparse_ext.txt` has four map entries in its GNU header and two in the
@@ -2217,6 +2281,123 @@ fn sparse_with_empty_continuation_tail(empty_blocks: usize) -> Vec<u8> {
     let insert_at = SPARSE_EXT_HEADER_OFFSET + 512;
     bytes.splice(insert_at..insert_at, tail);
     bytes
+}
+
+#[tokio::test]
+async fn sparse_parser_resumes_alternating_pending_reads() {
+    let (reader, _) = AlternatingPendingReader::new(tar!("sparse.tar").to_vec(), 7);
+    let mut archive = ArchiveBuilder::new(reader)
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(1)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    for expected in [
+        b"sparse_begin.txt".as_slice(),
+        b"sparse_end.txt".as_slice(),
+        b"sparse_ext.txt".as_slice(),
+        b"sparse.txt".as_slice(),
+    ] {
+        let entry = t!(entries.next().await.unwrap());
+        assert_eq!(&*t!(entry.header().path_bytes()), expected);
+    }
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn raw_sparse_entries_retain_their_stored_payload() {
+    let mut archive = ArchiveBuilder::new(Cursor::new(tar!("sparse.tar")))
+        .set_max_sparse_entries(0)
+        .set_max_sparse_continuation_blocks(0)
+        .build();
+    let mut entries = t!(archive.entries_raw());
+    let mut entry = t!(entries.next().await.unwrap());
+    let mut payload = Vec::new();
+
+    t!(entry.read_to_end(&mut payload).await);
+    assert_eq!(payload, b"test\n");
+
+    t!(entries.next().await.unwrap());
+    let extended = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(extended.header().path_bytes()), b"sparse_ext.txt");
+}
+
+#[tokio::test]
+async fn sparse_map_limit_survives_alternating_pending_reads() {
+    let (reader, position) =
+        AlternatingPendingReader::new(sparse_with_two_continuation_blocks(), 7);
+    let mut archive = ArchiveBuilder::new(reader)
+        .set_max_sparse_entries(5)
+        .set_max_sparse_continuation_blocks(2)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "archive sparse entry limit exceeded");
+    assert_eq!(
+        position.load(Ordering::Relaxed),
+        SPARSE_EXT_HEADER_OFFSET + 2 * 512
+    );
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn sparse_continuation_limit_survives_alternating_pending_reads() {
+    let (reader, position) =
+        AlternatingPendingReader::new(sparse_with_empty_continuation_tail(2), 7);
+    let mut archive = ArchiveBuilder::new(reader)
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(2)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+    let err = entries.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "archive sparse continuation block limit exceeded"
+    );
+    assert_eq!(
+        position.load(Ordering::Relaxed),
+        SPARSE_EXT_HEADER_OFFSET + 2 * 512
+    );
+    assert!(entries.next().await.is_none());
+}
+
+#[tokio::test]
+async fn sparse_parser_survives_cancelled_next_future() {
+    let (reader, position) = AlternatingPendingReader::new(tar!("sparse.tar").to_vec(), 7);
+    let mut archive = ArchiveBuilder::new(reader)
+        .set_max_sparse_entries(6)
+        .set_max_sparse_continuation_blocks(1)
+        .build();
+    let mut entries = t!(archive.entries());
+
+    t!(entries.next().await.unwrap());
+    t!(entries.next().await.unwrap());
+
+    let mut next = Box::pin(entries.next());
+    loop {
+        let outcome = std::future::poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+        match outcome {
+            Poll::Pending
+                if position.load(Ordering::Relaxed) > SPARSE_EXT_HEADER_OFFSET
+                    && position.load(Ordering::Relaxed) < SPARSE_EXT_HEADER_OFFSET + 512 =>
+            {
+                break;
+            }
+            Poll::Pending => {}
+            Poll::Ready(_) => panic!("sparse entry completed before cancellation point"),
+        }
+    }
+    drop(next);
+
+    let entry = t!(entries.next().await.unwrap());
+    assert_eq!(&*t!(entry.header().path_bytes()), b"sparse_ext.txt");
+    assert_eq!(entry.raw_file_position(), 3072);
 }
 
 #[tokio::test]
