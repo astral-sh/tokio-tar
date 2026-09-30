@@ -1,5 +1,13 @@
 # `astral-tokio-tar`
 
+> [!WARNING]
+>
+> This library is in the process of being deprecated. We encourage external users of it
+> to migrate away from it since non-security enhancements and bugfixes are unlikely to
+> be prioritized. For (the majority of) users who need strict tar encoding and decoding,
+> we recommend [tar-codec](https://github.com/astral-sh/tar-codec) as a potential
+> alternative.
+
 A `tokio`-based tar archive reader and writer.
 
 ## Provenance
