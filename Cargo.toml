@@ -46,3 +46,6 @@ default = ["xattr"]
 
 [lib]
 name = "tokio_tar"
+
+[badges]
+maintenance.status = "deprecated"
