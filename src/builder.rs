@@ -110,10 +110,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// Adds a new entry to this archive.
     ///
     /// This function will append the header specified, followed by contents of
-    /// the stream specified by `data`. To produce a valid archive the `size`
-    /// field of `header` must be the same as the length of the stream that's
-    /// being written. Additionally the checksum for the header should have been
-    /// set via the `set_cksum` method.
+    /// the stream specified by `data`. At most `header.entry_size()` bytes are
+    /// written from `data`. If `data` is shorter than that, this function
+    /// returns an error. Additionally the checksum for the header should have
+    /// been set via the `set_cksum` method.
     ///
     /// Note that this will not attempt to seek the archive to a valid position,
     /// so if the archive is in the middle of a read or some other similar
@@ -125,7 +125,8 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// # Errors
     ///
     /// This function will return an error for any intermittent I/O error which
-    /// occurs when either reading or writing.
+    /// occurs when either reading or writing, or if `data` is shorter than the
+    /// size declared in `header`.
     ///
     /// # Examples
     ///
@@ -166,9 +167,9 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// header will be modified.
     ///
     /// Then it will append the header, followed by contents of the stream
-    /// specified by `data`. To produce a valid archive the `size` field of
-    /// `header` must be the same as the length of the stream that's being
-    /// written.
+    /// specified by `data`. At most `header.entry_size()` bytes are written
+    /// from `data`. If `data` is shorter than that, this function returns an
+    /// error.
     ///
     /// Note that this will not attempt to seek the archive to a valid position,
     /// so if the archive is in the middle of a read or some other similar
@@ -180,7 +181,8 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// # Errors
     ///
     /// This function will return an error for any intermittent I/O error which
-    /// occurs when either reading or writing.
+    /// occurs when either reading or writing, or if `data` is shorter than the
+    /// size declared in `header`.
     ///
     /// # Examples
     ///
@@ -441,14 +443,29 @@ impl<W: Write + Unpin + Send> Builder<W> {
 async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
     mut dst: &mut Dst,
     header: &Header,
-    mut data: &mut Data,
+    data: &mut Data,
 ) -> io::Result<()> {
+    // A freshly created header represents an empty entry even though its size
+    // field is NUL-filled rather than encoded as octal zero.
+    let expected = match header.entry_size() {
+        Ok(size) => size,
+        Err(_) if header.as_old().size.iter().all(|byte| *byte == 0) => 0,
+        Err(error) => return Err(error),
+    };
     dst.write_all(header.as_bytes()).await?;
-    let len = io::copy(&mut data, &mut dst).await?;
+    let len = io::copy(&mut data.take(expected), &mut dst).await?;
+    if len != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "failed to write the complete contents of the tar entry: expected {expected} bytes, got {len}"
+            ),
+        ));
+    }
 
     // Pad with zeros if necessary.
     let buf = [0; 512];
-    let remaining = 512 - (len % 512);
+    let remaining = 512 - (expected % 512);
     if remaining < 512 {
         dst.write_all(&buf[..remaining as usize]).await?;
     }
